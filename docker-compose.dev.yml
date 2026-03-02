@@ -1,0 +1,115 @@
+# Docker Compose for DEVELOPMENT environment
+# Features: Hot reload, debug tools, volume mounts
+
+services:
+  # SOC Alerting Application (Development mode with hot reload)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development # Use development stage
+    container_name: soc_alerting_app_dev
+    ports:
+      - "8000:8000"
+    volumes:
+      # Hot reload: Mount source code as volume
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+      - ./alembic.ini:/app/alembic.ini
+      # Exclude Python cache
+      - /app/src/__pycache__
+    environment:
+      - DATABASE_URL=postgresql://soc_user:secure_password@postgres:5432/soc_alerting
+      - NIST_API_KEY=${NIST_API_KEY:-}
+      - LOG_LEVEL=DEBUG
+      - PYTHONPATH=/app/src
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - soc_network
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 5 &&
+        echo 'Running migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting application in development mode...' &&
+        python -m soc_alerting.main
+      "
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: soc_alerting_db_dev
+    environment:
+      POSTGRES_USER: soc_user
+      POSTGRES_PASSWORD: secure_password
+      POSTGRES_DB: soc_alerting
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+      # Optional: Init scripts
+      # - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soc_user -d soc_alerting"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - soc_network
+    restart: unless-stopped
+
+  # pgAdmin for database management (optional - use with --profile tools)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: soc_alerting_pgadmin_dev
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@soc-alerting.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    volumes:
+      - pgadmin_data_dev:/var/lib/pgadmin
+    networks:
+      - soc_network
+    restart: unless-stopped
+    profiles:
+      - tools # Only start with: docker-compose -f docker-compose.dev.yml --profile tools up
+
+  # Redis for caching (optional - for future use with Celery)
+  redis:
+    image: redis:7-alpine
+    container_name: soc_alerting_redis_dev
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_dev:/data
+    networks:
+      - soc_network
+    restart: unless-stopped
+    profiles:
+      - cache
+    command: redis-server --appendonly yes
+
+volumes:
+  postgres_data_dev:
+    driver: local
+  pgadmin_data_dev:
+    driver: local
+  redis_data_dev:
+    driver: local
+
+networks:
+  soc_network:
+    driver: bridge

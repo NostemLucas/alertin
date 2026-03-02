@@ -1,0 +1,45 @@
+# Core framework
+pydantic==2.6.1
+pydantic-settings==2.1.0
+
+# Database
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# HTTP clients
+httpx==0.26.0
+tenacity==8.2.3
+
+# Web API
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Scheduling
+apscheduler==3.10.4
+
+# NLP (HuggingFace)
+transformers==4.37.2
+torch==2.1.2
+sentencepiece==0.1.99
+
+# Caching
+cachetools==5.3.2
+
+# Utilities
+python-dateutil==2.8.2
+python-dotenv==1.0.1
+
+# Logging
+structlog==24.1.0
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+respx==0.20.2
+
+# Development
+black==24.1.1
+ruff==0.1.14
+mypy==1.8.0
