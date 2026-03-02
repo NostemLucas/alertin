@@ -1,14 +1,14 @@
 """
 Database connection management.
 
-Handles SQLAlchemy engine and session creation.
+Handles async SQLAlchemy engine and session creation.
 """
 
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import QueuePool
-from contextlib import contextmanager
-from typing import Generator
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import event, text
+from sqlalchemy.pool import AsyncAdaptedQueuePool
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 import logging
 
 from ..config.settings import get_settings
@@ -26,35 +26,40 @@ class DatabaseConnection:
 
     def __init__(self, database_url: str | None = None):
         """
-        Initialize database connection.
+        Initialize async database connection.
 
         Args:
             database_url: Database URL (defaults to settings)
         """
         settings = get_settings()
-        self.database_url = database_url or settings.database_url
+        raw_url = database_url or settings.database_url
 
-        # Create engine with connection pooling
-        self.engine = create_engine(
+        # Convert to async URL (postgresql+asyncpg://)
+        if raw_url.startswith("postgresql://"):
+            self.database_url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif raw_url.startswith("postgresql+asyncpg://"):
+            self.database_url = raw_url
+        else:
+            self.database_url = raw_url
+
+        # Create async engine with connection pooling
+        self.engine = create_async_engine(
             self.database_url,
-            poolclass=QueuePool,
+            poolclass=AsyncAdaptedQueuePool,
             pool_size=settings.database_pool_size,
             max_overflow=settings.database_max_overflow,
             pool_pre_ping=True,  # Test connections before using
             echo=False,  # Set to True for SQL debugging
         )
 
-        # Create session factory
-        self.SessionLocal = sessionmaker(
-            autocommit=False,
-            autoflush=False,
-            bind=self.engine
+        # Create async session factory
+        self.SessionLocal = async_sessionmaker(
+            self.engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
         )
 
-        # Register connection listeners
-        self._register_listeners()
-
-        logger.info(f"Database connection initialized: {self._get_safe_url()}")
+        logger.info(f"Async database connection initialized: {self._get_safe_url()}")
 
     def _get_safe_url(self) -> str:
         """Get database URL with password masked."""
@@ -67,18 +72,6 @@ class DatabaseConnection:
                 return f"{user_pass[0]}:****@{parts[1]}"
         return url
 
-    def _register_listeners(self):
-        """Register SQLAlchemy event listeners."""
-
-        @event.listens_for(self.engine, "connect")
-        def receive_connect(dbapi_conn, connection_record):
-            """Handle new connection."""
-            logger.debug("New database connection established")
-
-        @event.listens_for(self.engine, "checkout")
-        def receive_checkout(dbapi_conn, connection_record, connection_proxy):
-            """Handle connection checkout from pool."""
-            logger.debug("Connection checked out from pool")
 
     async def initialize(self):
         """
@@ -87,76 +80,78 @@ class DatabaseConnection:
         Note: In production, use Alembic migrations instead.
         """
         logger.info("Initializing database schema...")
-        Base.metadata.create_all(bind=self.engine)
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
         logger.info("Database schema initialized")
 
-    def create_tables(self):
+    async def create_tables(self):
         """
-        Create all tables (synchronous).
+        Create all tables (async).
 
         WARNING: This is for development only. Use Alembic in production.
         """
         logger.warning("Creating tables directly (use Alembic in production)")
-        Base.metadata.create_all(bind=self.engine)
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
 
-    def drop_tables(self):
+    async def drop_tables(self):
         """
-        Drop all tables (synchronous).
+        Drop all tables (async).
 
         WARNING: This will delete all data!
         """
         logger.warning("Dropping all tables - DATA WILL BE LOST")
-        Base.metadata.drop_all(bind=self.engine)
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
 
-    @contextmanager
-    def get_session(self) -> Generator[Session, None, None]:
+    @asynccontextmanager
+    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
         """
-        Get a database session with automatic cleanup.
+        Get an async database session with automatic cleanup.
 
         Usage:
-            with db.get_session() as session:
-                session.query(CVERecord).all()
+            async with db.get_session() as session:
+                result = await session.execute(select(CVERecord))
 
         Yields:
-            SQLAlchemy session
+            Async SQLAlchemy session
         """
         session = self.SessionLocal()
         try:
             yield session
-            session.commit()
+            await session.commit()
         except Exception as e:
-            session.rollback()
+            await session.rollback()
             logger.error(f"Session error: {e}")
             raise
         finally:
-            session.close()
+            await session.close()
 
-    def get_raw_session(self) -> Session:
+    def get_raw_session(self) -> AsyncSession:
         """
-        Get a raw session (manual cleanup required).
+        Get a raw async session (manual cleanup required).
 
         Returns:
-            SQLAlchemy session (must be closed manually)
+            Async SQLAlchemy session (must be closed manually)
         """
         return self.SessionLocal()
 
     async def close(self):
         """Close database connection and dispose engine."""
         logger.info("Closing database connections...")
-        self.engine.dispose()
+        await self.engine.dispose()
         logger.info("Database connections closed")
 
-    def health_check(self) -> bool:
+    async def health_check(self) -> bool:
         """
-        Check database connectivity.
+        Check database connectivity (async).
 
         Returns:
             True if connection successful, False otherwise
         """
         try:
-            from sqlalchemy import text
-            with self.get_session() as session:
-                session.execute(text("SELECT 1"))
+            async with self.get_session() as session:
+                await session.execute(text("SELECT 1"))
             return True
         except Exception as e:
             logger.error(f"Database health check failed: {e}")

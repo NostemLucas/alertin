@@ -1,57 +1,60 @@
 """
-CVE Repository - CRUD operations for CVE records.
+CVE Repository - Async CRUD operations for CVE records.
 
-Handles database operations for CVE storage and retrieval.
+Handles async database operations for CVE storage and retrieval.
 """
 
 import logging
 from typing import Optional
 from datetime import datetime
-from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc, func
+from sqlalchemy.orm import selectinload
 
 from ..connection import get_database
-from ...models.database import CVERecord, CVEEnrichmentRecord
+from ...models.database import CVERecord, CVEEnrichmentRecord, CISAKEVMetadata
 from ...models.domain import CVE, SeverityLevel
 
 logger = logging.getLogger(__name__)
 
 
 class CVERepository:
-    """Repository for CVE database operations."""
+    """Async repository for CVE database operations."""
 
-    def __init__(self, session: Optional[Session] = None):
+    def __init__(self, session: Optional[AsyncSession] = None):
         """
-        Initialize repository.
+        Initialize async repository.
 
         Args:
-            session: Optional SQLAlchemy session. If None, uses default DB connection.
+            session: Optional async SQLAlchemy session. If None, uses default DB connection.
         """
         self.session = session
         self._owns_session = session is None
 
-    def __enter__(self):
-        """Context manager entry."""
+    async def __aenter__(self):
+        """Async context manager entry."""
         if self._owns_session:
             db = get_database()
             self.session = db.get_raw_session()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
         if self._owns_session and self.session:
             if exc_type is None:
-                self.session.commit()
+                await self.session.commit()
             else:
-                self.session.rollback()
-            self.session.close()
+                await self.session.rollback()
+            await self.session.close()
 
-    def create_or_update(self, cve: CVE) -> CVERecord:
+    async def create_or_update(self, cve: CVE) -> CVERecord:
         """
-        Create or update CVE record.
+        Create or update CVE record (async).
 
         If CVE exists and has been modified, updates it.
         Otherwise, creates new record.
+
+        Note: CISA KEV metadata should be handled separately via upsert_cisa_metadata()
 
         Args:
             cve: Domain CVE model
@@ -59,22 +62,30 @@ class CVERepository:
         Returns:
             Database CVE record
         """
-        existing = self.session.query(CVERecord).filter_by(cve_id=cve.cve_id).first()
+        result = await self.session.execute(
+            select(CVERecord).filter_by(cve_id=cve.cve_id)
+        )
+        existing = result.scalar_one_or_none()
 
         if existing:
             # Check if modified
             if existing.last_modified_date != cve.last_modified_date:
                 logger.info(f"Updating CVE {cve.cve_id} (modified: {cve.last_modified_date})")
-                self._update_record(existing, cve)
+                await self._update_record(existing, cve)
             else:
                 logger.debug(f"CVE {cve.cve_id} unchanged, skipping")
             return existing
         else:
             logger.info(f"Creating new CVE record: {cve.cve_id}")
-            return self._create_record(cve)
+            return await self._create_record(cve)
 
-    def _create_record(self, cve: CVE) -> CVERecord:
-        """Create new CVE record from domain model."""
+    async def _create_record(self, cve: CVE) -> CVERecord:
+        """
+        Create new CVE record from domain model (async).
+
+        Note: CISA fields removed - now stored in cisa_kev_metadata table.
+        Note: References removed - now stored in cve_references table.
+        """
         record = CVERecord(
             cve_id=cve.cve_id,
             description=cve.description,
@@ -90,20 +101,19 @@ class CVERepository:
             classification_sources=[s.value for s in cve.classification_sources],
             source_identifier=cve.source_identifier,
             vuln_status=cve.vuln_status,
-            references=cve.references,
-            cisa_exploit_add=cve.cisa_exploit_add,
-            cisa_action_due=cve.cisa_action_due,
-            cisa_required_action=cve.cisa_required_action,
-            cisa_vulnerability_name=cve.cisa_vulnerability_name,
-            cisa_known_ransomware=cve.cisa_known_ransomware,
         )
 
         self.session.add(record)
-        self.session.flush()  # Get ID without committing
+        await self.session.flush()  # Get ID without committing
         return record
 
-    def _update_record(self, record: CVERecord, cve: CVE):
-        """Update existing CVE record."""
+    async def _update_record(self, record: CVERecord, cve: CVE):
+        """
+        Update existing CVE record (async).
+
+        Note: CISA fields removed - now stored in cisa_kev_metadata table.
+        Note: References removed - now stored in cve_references table.
+        """
         record.description = cve.description
         record.last_modified_date = cve.last_modified_date
         record.cvss_v3_score = cve.cvss_v3_score
@@ -116,19 +126,13 @@ class CVERepository:
         record.classification_sources = [s.value for s in cve.classification_sources]
         record.source_identifier = cve.source_identifier
         record.vuln_status = cve.vuln_status
-        record.references = cve.references
-        record.cisa_exploit_add = cve.cisa_exploit_add
-        record.cisa_action_due = cve.cisa_action_due
-        record.cisa_required_action = cve.cisa_required_action
-        record.cisa_vulnerability_name = cve.cisa_vulnerability_name
-        record.cisa_known_ransomware = cve.cisa_known_ransomware
         record.updated_at = datetime.utcnow()
 
-        self.session.flush()
+        await self.session.flush()
 
-    def get_by_id(self, cve_id: str) -> Optional[CVERecord]:
+    async def get_by_id(self, cve_id: str) -> Optional[CVERecord]:
         """
-        Get CVE by ID.
+        Get CVE by ID (async).
 
         Args:
             cve_id: CVE identifier
@@ -136,9 +140,12 @@ class CVERepository:
         Returns:
             CVE record or None
         """
-        return self.session.query(CVERecord).filter_by(cve_id=cve_id).first()
+        result = await self.session.execute(
+            select(CVERecord).filter_by(cve_id=cve_id)
+        )
+        return result.scalar_one_or_none()
 
-    def get_all(
+    async def get_all(
         self,
         limit: int = 100,
         offset: int = 0,
@@ -146,7 +153,7 @@ class CVERepository:
         in_cisa_kev: Optional[bool] = None,
     ) -> list[CVERecord]:
         """
-        Get all CVEs with optional filtering.
+        Get all CVEs with optional filtering (async).
 
         Args:
             limit: Maximum results
@@ -157,7 +164,7 @@ class CVERepository:
         Returns:
             List of CVE records
         """
-        query = self.session.query(CVERecord)
+        query = select(CVERecord)
 
         if severity:
             query = query.filter_by(final_severity=severity.value)
@@ -168,11 +175,12 @@ class CVERepository:
         query = query.order_by(desc(CVERecord.published_date))
         query = query.limit(limit).offset(offset)
 
-        return query.all()
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
-    def get_critical_cves(self, limit: int = 50) -> list[CVERecord]:
+    async def get_critical_cves(self, limit: int = 50) -> list[CVERecord]:
         """
-        Get CRITICAL severity CVEs.
+        Get CRITICAL severity CVEs (async).
 
         Args:
             limit: Maximum results
@@ -180,17 +188,18 @@ class CVERepository:
         Returns:
             List of critical CVE records
         """
-        return (
-            self.session.query(CVERecord)
+        query = (
+            select(CVERecord)
             .filter_by(final_severity=SeverityLevel.CRITICAL.value)
             .order_by(desc(CVERecord.published_date))
             .limit(limit)
-            .all()
         )
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
-    def get_cisa_kev_cves(self, limit: int = 100) -> list[CVERecord]:
+    async def get_cisa_kev_cves(self, limit: int = 100) -> list[CVERecord]:
         """
-        Get CVEs in CISA KEV catalog.
+        Get CVEs in CISA KEV catalog (async).
 
         Args:
             limit: Maximum results
@@ -198,17 +207,18 @@ class CVERepository:
         Returns:
             List of KEV CVE records
         """
-        return (
-            self.session.query(CVERecord)
+        query = (
+            select(CVERecord)
             .filter_by(is_in_cisa_kev=True)
-            .order_by(desc(CVERecord.cisa_exploit_add))
+            .order_by(desc(CVERecord.published_date))
             .limit(limit)
-            .all()
         )
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
-    def get_recent_cves(self, hours: int = 24, limit: int = 100) -> list[CVERecord]:
+    async def get_recent_cves(self, hours: int = 24, limit: int = 100) -> list[CVERecord]:
         """
-        Get recently published CVEs.
+        Get recently published CVEs (async).
 
         Args:
             hours: Look back hours
@@ -221,49 +231,54 @@ class CVERepository:
 
         cutoff = datetime.utcnow() - timedelta(hours=hours)
 
-        return (
-            self.session.query(CVERecord)
+        query = (
+            select(CVERecord)
             .filter(CVERecord.published_date >= cutoff)
             .order_by(desc(CVERecord.published_date))
             .limit(limit)
-            .all()
         )
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
-    def get_statistics(self) -> dict:
+    async def get_statistics(self) -> dict:
         """
-        Get CVE database statistics.
+        Get CVE database statistics (async).
 
         Returns:
             Dictionary with statistics
         """
-        total = self.session.query(func.count(CVERecord.cve_id)).scalar()
+        # Total count
+        total_result = await self.session.execute(
+            select(func.count(CVERecord.cve_id))
+        )
+        total = total_result.scalar()
 
-        by_severity = (
-            self.session.query(
+        # By severity
+        severity_result = await self.session.execute(
+            select(
                 CVERecord.final_severity,
                 func.count(CVERecord.cve_id).label("count"),
-            )
-            .group_by(CVERecord.final_severity)
-            .all()
+            ).group_by(CVERecord.final_severity)
         )
+        by_severity = severity_result.all()
 
-        kev_count = (
-            self.session.query(func.count(CVERecord.cve_id))
-            .filter_by(is_in_cisa_kev=True)
-            .scalar()
+        # KEV count
+        kev_result = await self.session.execute(
+            select(func.count(CVERecord.cve_id)).filter_by(is_in_cisa_kev=True)
         )
+        kev_count = kev_result.scalar()
 
         stats = {
-            "total_cves": total,
-            "in_cisa_kev": kev_count,
+            "total_cves": total or 0,
+            "in_cisa_kev": kev_count or 0,
             "by_severity": {severity: count for severity, count in by_severity},
         }
 
         return stats
 
-    def delete_by_id(self, cve_id: str) -> bool:
+    async def delete_by_id(self, cve_id: str) -> bool:
         """
-        Delete CVE by ID.
+        Delete CVE by ID (async).
 
         Args:
             cve_id: CVE identifier
@@ -271,14 +286,17 @@ class CVERepository:
         Returns:
             True if deleted, False if not found
         """
-        record = self.get_by_id(cve_id)
+        record = await self.get_by_id(cve_id)
         if record:
-            self.session.delete(record)
-            self.session.flush()
+            await self.session.delete(record)
+            await self.session.flush()
             logger.info(f"Deleted CVE: {cve_id}")
             return True
         return False
 
-    def count(self) -> int:
-        """Get total CVE count."""
-        return self.session.query(func.count(CVERecord.cve_id)).scalar()
+    async def count(self) -> int:
+        """Get total CVE count (async)."""
+        result = await self.session.execute(
+            select(func.count(CVERecord.cve_id))
+        )
+        return result.scalar() or 0

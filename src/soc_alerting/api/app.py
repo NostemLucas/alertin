@@ -106,11 +106,11 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health_check():
-        """Health check endpoint."""
+        """Health check endpoint (async)."""
         from ..database.connection import get_database
 
         db = get_database()
-        db_healthy = db.health_check()
+        db_healthy = await db.health_check()
 
         return {
             "status": "healthy" if db_healthy else "unhealthy",
@@ -121,15 +121,15 @@ def create_app() -> FastAPI:
     @app.get("/statistics", response_model=StatisticsResponse)
     async def get_statistics():
         """
-        Obtener estadísticas de CVEs en base de datos.
+        Obtener estadísticas de CVEs en base de datos (async).
 
         Retorna:
         - Total de CVEs
         - CVEs en CISA KEV
         - Distribución por severidad
         """
-        with CVERepository() as repo:
-            stats = repo.get_statistics()
+        async with CVERepository() as repo:
+            stats = await repo.get_statistics()
 
         return stats
 
@@ -141,7 +141,7 @@ def create_app() -> FastAPI:
         in_cisa_kev: Optional[bool] = Query(default=None, description="Filtrar por CISA KEV"),
     ):
         """
-        Listar CVEs con filtros opcionales.
+        Listar CVEs con filtros opcionales (async).
 
         Parámetros:
         - limit: Cantidad máxima de resultados (default: 50)
@@ -160,8 +160,8 @@ def create_app() -> FastAPI:
                         detail=f"Severidad inválida. Use: {', '.join([s.value for s in SeverityLevel])}",
                     )
 
-            with CVERepository() as repo:
-                cves = repo.get_all(
+            async with CVERepository() as repo:
+                cves = await repo.get_all(
                     limit=limit,
                     offset=offset,
                     severity=severity_filter,
@@ -178,10 +178,10 @@ def create_app() -> FastAPI:
 
     @app.get("/cves/debug")
     async def debug_cves(limit: int = Query(default=1, ge=1, le=10)):
-        """Debug endpoint - return raw CVE data without validation."""
+        """Debug endpoint - return raw CVE data without validation (async)."""
         try:
-            with CVERepository() as repo:
-                cves = repo.get_all(limit=limit)
+            async with CVERepository() as repo:
+                cves = await repo.get_all(limit=limit)
 
                 if not cves:
                     return {"message": "No CVEs found"}
@@ -211,14 +211,14 @@ def create_app() -> FastAPI:
         limit: int = Query(default=50, ge=1, le=500, description="Máximo de resultados"),
     ):
         """
-        Listar CVEs CRITICAL.
+        Listar CVEs CRITICAL (async).
 
         Los CVEs CRITICAL incluyen:
         - CVEs con CVSS >= 9.0
         - Todos los CVEs en CISA KEV (override automático)
         """
-        with CVERepository() as repo:
-            cves = repo.get_critical_cves(limit=limit)
+        async with CVERepository() as repo:
+            cves = await repo.get_critical_cves(limit=limit)
             result = [CVEResponse.model_validate(cve) for cve in cves]
 
         return result
@@ -228,13 +228,13 @@ def create_app() -> FastAPI:
         limit: int = Query(default=100, ge=1, le=500, description="Máximo de resultados"),
     ):
         """
-        Listar CVEs en CISA Known Exploited Vulnerabilities.
+        Listar CVEs en CISA Known Exploited Vulnerabilities (async).
 
         Estos CVEs tienen explotación confirmada en la vida real y
         son clasificados automáticamente como CRITICAL.
         """
-        with CVERepository() as repo:
-            cves = repo.get_cisa_kev_cves(limit=limit)
+        async with CVERepository() as repo:
+            cves = await repo.get_cisa_kev_cves(limit=limit)
             result = [CVEResponse.model_validate(cve) for cve in cves]
 
         return result
@@ -245,14 +245,14 @@ def create_app() -> FastAPI:
         limit: int = Query(default=100, ge=1, le=500, description="Máximo de resultados"),
     ):
         """
-        Listar CVEs publicados recientemente.
+        Listar CVEs publicados recientemente (async).
 
         Parámetros:
         - hours: Horas hacia atrás (default: 24, max: 168 = 1 semana)
         - limit: Máximo de resultados
         """
-        with CVERepository() as repo:
-            cves = repo.get_recent_cves(hours=hours, limit=limit)
+        async with CVERepository() as repo:
+            cves = await repo.get_recent_cves(hours=hours, limit=limit)
             result = [CVEResponse.model_validate(cve) for cve in cves]
 
         return result
@@ -260,13 +260,13 @@ def create_app() -> FastAPI:
     @app.get("/cves/{cve_id}", response_model=CVEResponse)
     async def get_cve(cve_id: str):
         """
-        Obtener detalles de un CVE específico.
+        Obtener detalles de un CVE específico (async).
 
         Parámetros:
         - cve_id: Identificador CVE (ej: CVE-2021-44228)
         """
-        with CVERepository() as repo:
-            cve = repo.get_by_id(cve_id)
+        async with CVERepository() as repo:
+            cve = await repo.get_by_id(cve_id)
             if not cve:
                 raise HTTPException(status_code=404, detail=f"CVE {cve_id} no encontrado")
             result = CVEResponse.model_validate(cve)

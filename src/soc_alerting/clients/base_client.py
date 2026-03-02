@@ -111,14 +111,20 @@ class BaseAPIClient:
         Raises:
             httpx.HTTPError: On request failure after retries
         """
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        # Support both relative and absolute URLs
+        # If endpoint starts with http://, use it as-is
+        # Otherwise, combine with base_url
+        if endpoint.startswith(('http://', 'https://')):
+            url = endpoint
+        else:
+            url = f"{self.base_url}/{endpoint.lstrip('/')}"
 
         logger.debug(f"{method} {url} (params={params})")
 
         try:
             response = await self.client.request(
                 method=method,
-                url=endpoint,
+                url=url,  # Use the constructed URL, not just endpoint
                 params=params,
                 headers=headers,
                 json=json_data,

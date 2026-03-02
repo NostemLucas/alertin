@@ -85,17 +85,15 @@ class CISAClient(BaseAPIClient):
             logger.info("Using cached CISA KEV catalog")
             return self._cache[cache_key]
 
-        # Fetch from API
+        # Fetch from API using BaseAPIClient's _request method
+        # This gives us retries, timeout handling, and connection pooling
         logger.info(f"Fetching CISA KEV catalog from {self.kev_url}")
 
         try:
-            # Make request to full URL (not using base_url)
-            # We need to override the client's request method for this
-            import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(self.kev_url)
-                response.raise_for_status()
-                data = response.json()
+            # Use inherited _request method with full URL
+            # (BaseAPIClient supports both relative and absolute URLs)
+            response = await self._request("GET", self.kev_url)
+            data = response.json()
 
             # Parse into Pydantic model
             catalog = CISAKEVCatalog(**data)
@@ -112,9 +110,6 @@ class CISAClient(BaseAPIClient):
 
             return catalog
 
-        except httpx.HTTPError as e:
-            logger.error(f"Failed to fetch CISA KEV catalog: {e}")
-            raise
         except ValidationError as e:
             logger.error(f"Failed to parse CISA KEV catalog: {e}")
             raise
