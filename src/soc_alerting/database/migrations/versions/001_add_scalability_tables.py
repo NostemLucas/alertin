@@ -15,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '001_scalability'
-down_revision = None
+down_revision = '000_initial'  # Depends on initial schema
 branch_labels = None
 depends_on = None
 
@@ -111,58 +111,17 @@ def upgrade() -> None:
     op.create_index('uq_cve_ref_url', 'cve_references', ['cve_id', 'url'], unique=True)
 
     # ============================================================================
-    # 4. Migrate existing CISA KEV data from cves table
+    # 4. Data migration - SKIPPED FOR CLEAN INSTALLS
     # ============================================================================
-    op.execute("""
-        INSERT INTO cisa_kev_metadata (
-            cve_id,
-            exploit_add,
-            action_due,
-            required_action,
-            vulnerability_name,
-            known_ransomware
-        )
-        SELECT
-            cve_id,
-            cisa_exploit_add,
-            cisa_action_due,
-            COALESCE(cisa_required_action, 'Apply updates per vendor instructions'),
-            cisa_vulnerability_name,
-            COALESCE(cisa_known_ransomware, false)
-        FROM cves
-        WHERE is_in_cisa_kev = true
-          AND cisa_exploit_add IS NOT NULL
-    """)
+    # Note: For existing databases upgrading from the old schema, you would need
+    # to migrate CISA data from old columns. For clean installs, this is not needed.
+    # The new CVERepository.save_complete_cve() handles populating these tables.
 
     # ============================================================================
-    # 5. Migrate existing references from cves.references JSONB to cve_references table
+    # 5. Column cleanup - SKIPPED FOR CLEAN INSTALLS
     # ============================================================================
-    op.execute("""
-        INSERT INTO cve_references (cve_id, url, source, reference_type)
-        SELECT
-            c.cve_id,
-            jsonb_array_elements_text(c.references) as url,
-            'NIST' as source,
-            NULL as reference_type
-        FROM cves c
-        WHERE c.references IS NOT NULL
-          AND jsonb_array_length(c.references) > 0
-        ON CONFLICT (cve_id, url) DO NOTHING
-    """)
-
-    # ============================================================================
-    # 6. Drop CISA KEV columns from cves table (now in separate table)
-    # ============================================================================
-    op.drop_column('cves', 'cisa_exploit_add')
-    op.drop_column('cves', 'cisa_action_due')
-    op.drop_column('cves', 'cisa_required_action')
-    op.drop_column('cves', 'cisa_vulnerability_name')
-    op.drop_column('cves', 'cisa_known_ransomware')
-
-    # ============================================================================
-    # 7. Drop references column from cves (now in cve_references table)
-    # ============================================================================
-    op.drop_column('cves', 'references')
+    # Note: For existing databases, you would drop the old CISA and references columns.
+    # For clean installs with the new schema (migration 000), these columns never existed.
 
 
 def downgrade() -> None:

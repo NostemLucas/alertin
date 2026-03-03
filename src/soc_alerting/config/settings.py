@@ -169,6 +169,7 @@ class Settings(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False  # Allow case-insensitive env vars
+        extra = "ignore"  # Ignore extra fields from .env (e.g., Docker-specific vars)
 
 
 # Singleton instance

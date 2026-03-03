@@ -1,15 +1,21 @@
 """
 Database connection management.
 
-Handles async SQLAlchemy engine and session creation.
+Handles async SQLAlchemy engine and session creation with advanced features:
+- Connection pooling with event listeners
+- Automatic retry on connection failures
+- Health checks and monitoring
+- Graceful shutdown handling
 """
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy import event, text
-from sqlalchemy.pool import AsyncAdaptedQueuePool
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker, AsyncEngine
+from sqlalchemy import event, text, exc as sa_exc
+from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional, Dict, Any
 import logging
+import asyncio
+from datetime import datetime
 
 from ..config.settings import get_settings
 from ..models.database import Base
@@ -19,9 +25,14 @@ logger = logging.getLogger(__name__)
 
 class DatabaseConnection:
     """
-    Database connection manager.
+    Database connection manager with advanced features.
 
-    Handles engine creation, session management, and connection pooling.
+    Features:
+    - Async connection pooling
+    - Automatic reconnection on failures
+    - Connection pool monitoring
+    - Health checks and metrics
+    - Graceful shutdown
     """
 
     def __init__(self, database_url: str | None = None):
@@ -42,24 +53,71 @@ class DatabaseConnection:
         else:
             self.database_url = raw_url
 
-        # Create async engine with connection pooling
+        # Connection pool metrics
+        self._pool_stats: Dict[str, Any] = {
+            "total_checkouts": 0,
+            "total_checkins": 0,
+            "current_checked_out": 0,
+            "last_error": None,
+            "last_error_time": None,
+        }
+
+        # Create async engine with advanced pooling
         self.engine = create_async_engine(
             self.database_url,
             poolclass=AsyncAdaptedQueuePool,
             pool_size=settings.database_pool_size,
             max_overflow=settings.database_max_overflow,
             pool_pre_ping=True,  # Test connections before using
-            echo=False,  # Set to True for SQL debugging
+            pool_recycle=3600,   # Recycle connections after 1 hour
+            pool_timeout=30,     # Wait max 30s for connection
+            echo=False,          # Set to True for SQL debugging
+            echo_pool=False,     # Set to True for pool debugging
+            connect_args={
+                "timeout": 60,   # Connection timeout
+                "command_timeout": 60,  # Command execution timeout
+                "server_settings": {
+                    "application_name": "soc_alerting",
+                    "jit": "off",  # Disable JIT for better cold start
+                }
+            }
         )
+
+        # Setup pool event listeners
+        self._setup_pool_listeners()
 
         # Create async session factory
         self.SessionLocal = async_sessionmaker(
             self.engine,
             class_=AsyncSession,
             expire_on_commit=False,
+            autoflush=False,  # Manual flush for better control
         )
 
         logger.info(f"Async database connection initialized: {self._get_safe_url()}")
+        logger.info(f"Pool config: size={settings.database_pool_size}, overflow={settings.database_max_overflow}")
+
+    def _setup_pool_listeners(self):
+        """Setup connection pool event listeners for monitoring."""
+
+        @event.listens_for(self.engine.sync_engine.pool, "connect")
+        def on_connect(dbapi_conn, connection_record):  # noqa: ARG001
+            """Called when a new DB-API connection is created."""
+            logger.debug("New database connection created")
+
+        @event.listens_for(self.engine.sync_engine.pool, "checkout")
+        def on_checkout(dbapi_conn, connection_record, connection_proxy):  # noqa: ARG001
+            """Called when a connection is retrieved from the pool."""
+            self._pool_stats["total_checkouts"] += 1
+            self._pool_stats["current_checked_out"] += 1
+            logger.debug(f"Connection checked out (total: {self._pool_stats['current_checked_out']})")
+
+        @event.listens_for(self.engine.sync_engine.pool, "checkin")
+        def on_checkin(dbapi_conn, connection_record):  # noqa: ARG001
+            """Called when a connection is returned to the pool."""
+            self._pool_stats["total_checkins"] += 1
+            self._pool_stats["current_checked_out"] -= 1
+            logger.debug(f"Connection checked in (total: {self._pool_stats['current_checked_out']})")
 
     def _get_safe_url(self) -> str:
         """Get database URL with password masked."""
@@ -71,6 +129,22 @@ class DatabaseConnection:
                 user_pass = parts[0].split(':')
                 return f"{user_pass[0]}:****@{parts[1]}"
         return url
+
+    def get_pool_stats(self) -> Dict[str, Any]:
+        """
+        Get connection pool statistics.
+
+        Returns:
+            Dictionary with pool metrics
+        """
+        pool = self.engine.sync_engine.pool
+        return {
+            **self._pool_stats,
+            "pool_size": pool.size(),
+            "checked_out_connections": pool.checkedout(),
+            "overflow_connections": pool.overflow(),
+            "queue_size": pool.size() - pool.checkedout(),
+        }
 
 
     async def initialize(self):
@@ -105,9 +179,12 @@ class DatabaseConnection:
             await conn.run_sync(Base.metadata.drop_all)
 
     @asynccontextmanager
-    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
+    async def get_session(self, auto_commit: bool = True) -> AsyncGenerator[AsyncSession, None]:
         """
-        Get an async database session with automatic cleanup.
+        Get an async database session with automatic cleanup and error handling.
+
+        Args:
+            auto_commit: Automatically commit on success (default: True)
 
         Usage:
             async with db.get_session() as session:
@@ -115,17 +192,95 @@ class DatabaseConnection:
 
         Yields:
             Async SQLAlchemy session
+
+        Raises:
+            SQLAlchemy exceptions on database errors
         """
         session = self.SessionLocal()
         try:
             yield session
-            await session.commit()
+            if auto_commit:
+                await session.commit()
+        except sa_exc.OperationalError as e:
+            await session.rollback()
+            self._pool_stats["last_error"] = str(e)
+            self._pool_stats["last_error_time"] = datetime.utcnow()
+            logger.error(f"Database operational error: {e}", exc_info=True)
+            raise
+        except sa_exc.IntegrityError as e:
+            await session.rollback()
+            logger.error(f"Database integrity error: {e}", exc_info=True)
+            raise
+        except sa_exc.DataError as e:
+            await session.rollback()
+            logger.error(f"Database data error: {e}", exc_info=True)
+            raise
         except Exception as e:
             await session.rollback()
-            logger.error(f"Session error: {e}")
+            self._pool_stats["last_error"] = str(e)
+            self._pool_stats["last_error_time"] = datetime.utcnow()
+            logger.error(f"Unexpected session error: {e}", exc_info=True)
             raise
         finally:
             await session.close()
+
+    async def execute_with_retry(
+        self,
+        operation,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
+        backoff_factor: float = 2.0
+    ):
+        """
+        Execute a database operation with automatic retry on transient failures.
+
+        Args:
+            operation: Async callable that takes a session as argument
+            max_retries: Maximum number of retry attempts
+            retry_delay: Initial delay between retries (seconds)
+            backoff_factor: Multiplier for retry delay on each attempt
+
+        Returns:
+            Result from the operation
+
+        Raises:
+            Last exception if all retries fail
+
+        Example:
+            async def my_operation(session):
+                result = await session.execute(select(CVERecord))
+                return result.scalars().all()
+
+            cves = await db.execute_with_retry(my_operation)
+        """
+        last_exception = None
+        delay = retry_delay
+
+        for attempt in range(max_retries + 1):
+            try:
+                async with self.get_session() as session:
+                    result = await operation(session)
+                    return result
+            except (sa_exc.OperationalError, asyncio.TimeoutError) as e:
+                last_exception = e
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Database operation failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= backoff_factor
+                else:
+                    logger.error(f"Database operation failed after {max_retries + 1} attempts")
+                    raise
+            except Exception as e:
+                # Don't retry on non-transient errors
+                logger.error(f"Non-retryable database error: {e}")
+                raise
+
+        # Should never reach here, but just in case
+        if last_exception:
+            raise last_exception
 
     def get_raw_session(self) -> AsyncSession:
         """
@@ -142,20 +297,90 @@ class DatabaseConnection:
         await self.engine.dispose()
         logger.info("Database connections closed")
 
-    async def health_check(self) -> bool:
+    async def health_check(self, detailed: bool = False) -> Dict[str, Any]:
         """
-        Check database connectivity (async).
+        Check database connectivity with optional detailed metrics.
+
+        Args:
+            detailed: Include detailed pool statistics
 
         Returns:
-            True if connection successful, False otherwise
+            Dictionary with health check results
+
+        Example:
+            {
+                "healthy": True,
+                "latency_ms": 15.3,
+                "pool_stats": {...}  # if detailed=True
+            }
         """
+        start_time = datetime.utcnow()
+        result = {
+            "healthy": False,
+            "latency_ms": None,
+            "error": None,
+            "timestamp": start_time.isoformat(),
+        }
+
         try:
             async with self.get_session() as session:
+                # Simple connectivity check
                 await session.execute(text("SELECT 1"))
-            return True
+
+            end_time = datetime.utcnow()
+            latency = (end_time - start_time).total_seconds() * 1000
+
+            result["healthy"] = True
+            result["latency_ms"] = round(latency, 2)
+
+            if detailed:
+                result["pool_stats"] = self.get_pool_stats()
+                result["database_url"] = self._get_safe_url()
+
+            logger.debug(f"Health check passed (latency: {result['latency_ms']}ms)")
+            return result
+
         except Exception as e:
-            logger.error(f"Database health check failed: {e}")
-            return False
+            result["error"] = str(e)
+            result["error_type"] = type(e).__name__
+            logger.error(f"Health check failed: {e}")
+            return result
+
+    async def verify_tables_exist(self) -> Dict[str, bool]:
+        """
+        Verify that all required tables exist in the database.
+
+        Returns:
+            Dictionary mapping table names to existence status
+        """
+        tables = [
+            "cves",
+            "cisa_kev_metadata",
+            "affected_products",
+            "cve_references",
+            "cve_enrichments",
+            "cve_update_history",
+            "processing_logs",
+        ]
+
+        result = {}
+        try:
+            async with self.get_session() as session:
+                for table in tables:
+                    query = text(
+                        f"SELECT EXISTS (SELECT FROM information_schema.tables "
+                        f"WHERE table_name = '{table}')"
+                    )
+                    res = await session.execute(query)
+                    exists = res.scalar()
+                    result[table] = bool(exists)
+
+            logger.info(f"Table verification: {sum(result.values())}/{len(tables)} tables exist")
+            return result
+
+        except Exception as e:
+            logger.error(f"Table verification failed: {e}")
+            return {table: False for table in tables}
 
 
 # Global database instance

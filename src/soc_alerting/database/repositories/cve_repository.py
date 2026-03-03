@@ -14,38 +14,28 @@ from sqlalchemy.orm import selectinload
 from ..connection import get_database
 from ...models.database import CVERecord, CVEEnrichmentRecord, CISAKEVMetadata
 from ...models.domain import CVE, SeverityLevel
+from .cisa_repository import CISAKEVRepository
+from .reference_repository import CVEReferenceRepository
 
 logger = logging.getLogger(__name__)
 
 
 class CVERepository:
-    """Async repository for CVE database operations."""
+    """
+    Async repository for CVE database operations.
 
-    def __init__(self, session: Optional[AsyncSession] = None):
+    Designed for FastAPI dependency injection pattern.
+    Session lifecycle is managed by FastAPI, not by this repository.
+    """
+
+    def __init__(self, session: AsyncSession):
         """
-        Initialize async repository.
+        Initialize async repository with injected session.
 
         Args:
-            session: Optional async SQLAlchemy session. If None, uses default DB connection.
+            session: Async SQLAlchemy session (injected via FastAPI Depends)
         """
         self.session = session
-        self._owns_session = session is None
-
-    async def __aenter__(self):
-        """Async context manager entry."""
-        if self._owns_session:
-            db = get_database()
-            self.session = db.get_raw_session()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        if self._owns_session and self.session:
-            if exc_type is None:
-                await self.session.commit()
-            else:
-                await self.session.rollback()
-            await self.session.close()
 
     async def create_or_update(self, cve: CVE) -> CVERecord:
         """
@@ -300,3 +290,42 @@ class CVERepository:
             select(func.count(CVERecord.cve_id))
         )
         return result.scalar() or 0
+
+    async def save_complete_cve(self, cve: CVE) -> CVERecord:
+        """
+        Save complete CVE with all related data (coordinator method).
+
+        Saves to THREE tables in a single transaction:
+        1. cves (main table) - via create_or_update()
+        2. cisa_kev_metadata (if CVE in KEV)
+        3. cve_references (normalized references)
+
+        This fixes the data loss issue from the scalability migration.
+
+        Args:
+            cve: Domain CVE model
+
+        Returns:
+            CVE record from main table
+
+        Note: Session commit is handled by FastAPI dependency injection
+        """
+        logger.info(f"Saving complete CVE: {cve.cve_id}")
+
+        # 1. Save to main cves table
+        cve_record = await self.create_or_update(cve)
+
+        # 2. Save CISA KEV metadata (if applicable)
+        if cve.is_in_cisa_kev:
+            cisa_repo = CISAKEVRepository(self.session)
+            await cisa_repo.upsert_cisa_metadata(cve)
+            logger.debug(f"CISA KEV metadata saved for {cve.cve_id}")
+
+        # 3. Save references
+        if cve.references:
+            ref_repo = CVEReferenceRepository(self.session)
+            await ref_repo.bulk_upsert_references(cve)
+            logger.debug(f"References saved for {cve.cve_id}")
+
+        logger.info(f"Complete CVE saved: {cve.cve_id}")
+        return cve_record

@@ -5,19 +5,33 @@ Provides REST API to visualize CVEs, processing results, and statistics.
 """
 
 import logging
-from typing import Optional
+from typing import Optional, AsyncGenerator
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..database.connection import get_database
 from ..database.repositories.cve_repository import CVERepository
 from ..services.cve_processor import CVEProcessor
 from ..models.domain import SeverityLevel
 from ..config.settings import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+# Dependency Injection: Database session
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    FastAPI dependency for database session.
+
+    Yields async SQLAlchemy session with automatic cleanup.
+    """
+    db = get_database()
+    async with db.get_session() as session:
+        yield session
 
 
 # Response models
@@ -119,7 +133,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/statistics", response_model=StatisticsResponse)
-    async def get_statistics():
+    async def get_statistics(session: AsyncSession = Depends(get_db_session)):
         """
         Obtener estadísticas de CVEs en base de datos (async).
 
@@ -128,20 +142,20 @@ def create_app() -> FastAPI:
         - CVEs en CISA KEV
         - Distribución por severidad
         """
-        async with CVERepository() as repo:
-            stats = await repo.get_statistics()
-
+        repo = CVERepository(session)
+        stats = await repo.get_statistics()
         return stats
 
     @app.get("/cves", response_model=list[CVEResponse])
     async def list_cves(
+        session: AsyncSession = Depends(get_db_session),
         limit: int = Query(default=50, ge=1, le=500, description="Máximo de resultados"),
         offset: int = Query(default=0, ge=0, description="Offset para paginación"),
         severity: Optional[str] = Query(default=None, description="Filtrar por severidad"),
         in_cisa_kev: Optional[bool] = Query(default=None, description="Filtrar por CISA KEV"),
     ):
         """
-        Listar CVEs con filtros opcionales (async).
+        Listar CVEs con filtros opcionales (async with DI).
 
         Parámetros:
         - limit: Cantidad máxima de resultados (default: 50)
@@ -160,15 +174,15 @@ def create_app() -> FastAPI:
                         detail=f"Severidad inválida. Use: {', '.join([s.value for s in SeverityLevel])}",
                     )
 
-            async with CVERepository() as repo:
-                cves = await repo.get_all(
-                    limit=limit,
-                    offset=offset,
-                    severity=severity_filter,
-                    in_cisa_kev=in_cisa_kev,
-                )
-                # Convert to Pydantic models INSIDE the session context
-                result = [CVEResponse.model_validate(cve) for cve in cves]
+            repo = CVERepository(session)
+            cves = await repo.get_all(
+                limit=limit,
+                offset=offset,
+                severity=severity_filter,
+                in_cisa_kev=in_cisa_kev,
+            )
+            # Convert to Pydantic models (session still active via DI)
+            result = [CVEResponse.model_validate(cve) for cve in cves]
 
             logger.info(f"Retrieved {len(result)} CVEs from database")
             return result
@@ -177,101 +191,102 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/cves/debug")
-    async def debug_cves(limit: int = Query(default=1, ge=1, le=10)):
-        """Debug endpoint - return raw CVE data without validation (async)."""
+    async def debug_cves(
+        session: AsyncSession = Depends(get_db_session),
+        limit: int = Query(default=1, ge=1, le=10)
+    ):
+        """Debug endpoint - return raw CVE data without validation (async with DI)."""
         try:
-            async with CVERepository() as repo:
-                cves = await repo.get_all(limit=limit)
+            repo = CVERepository(session)
+            cves = await repo.get_all(limit=limit)
 
-                if not cves:
-                    return {"message": "No CVEs found"}
+            if not cves:
+                return {"message": "No CVEs found"}
 
-                # Try to convert manually
-                result = []
-                for cve in cves:
-                    try:
-                        # Convert to CVEResponse
-                        cve_response = CVEResponse.model_validate(cve)
-                        result.append(cve_response.model_dump())
-                    except Exception as e:
-                        logger.error(f"Error validating CVE {cve.cve_id}: {str(e)}")
-                        return {
-                            "error": f"Validation failed for {cve.cve_id}",
-                            "details": str(e),
-                            "cve_id": cve.cve_id,
-                        }
+            # Try to convert manually
+            result = []
+            for cve in cves:
+                try:
+                    # Convert to CVEResponse
+                    cve_response = CVEResponse.model_validate(cve)
+                    result.append(cve_response.model_dump())
+                except Exception as e:
+                    logger.error(f"Error validating CVE {cve.cve_id}: {str(e)}")
+                    return {
+                        "error": f"Validation failed for {cve.cve_id}",
+                        "details": str(e),
+                        "cve_id": cve.cve_id,
+                    }
 
-                return {"count": len(result), "cves": result}
+            return {"count": len(result), "cves": result}
         except Exception as e:
             logger.error(f"Debug endpoint error: {str(e)}")
             return {"error": str(e), "type": type(e).__name__}
 
     @app.get("/cves/critical", response_model=list[CVEResponse])
     async def list_critical_cves(
+        session: AsyncSession = Depends(get_db_session),
         limit: int = Query(default=50, ge=1, le=500, description="Máximo de resultados"),
     ):
         """
-        Listar CVEs CRITICAL (async).
+        Listar CVEs CRITICAL (async with DI).
 
         Los CVEs CRITICAL incluyen:
         - CVEs con CVSS >= 9.0
         - Todos los CVEs en CISA KEV (override automático)
         """
-        async with CVERepository() as repo:
-            cves = await repo.get_critical_cves(limit=limit)
-            result = [CVEResponse.model_validate(cve) for cve in cves]
-
-        return result
+        repo = CVERepository(session)
+        cves = await repo.get_critical_cves(limit=limit)
+        return [CVEResponse.model_validate(cve) for cve in cves]
 
     @app.get("/cves/cisa-kev", response_model=list[CVEResponse])
     async def list_cisa_kev_cves(
+        session: AsyncSession = Depends(get_db_session),
         limit: int = Query(default=100, ge=1, le=500, description="Máximo de resultados"),
     ):
         """
-        Listar CVEs en CISA Known Exploited Vulnerabilities (async).
+        Listar CVEs en CISA Known Exploited Vulnerabilities (async with DI).
 
         Estos CVEs tienen explotación confirmada en la vida real y
         son clasificados automáticamente como CRITICAL.
         """
-        async with CVERepository() as repo:
-            cves = await repo.get_cisa_kev_cves(limit=limit)
-            result = [CVEResponse.model_validate(cve) for cve in cves]
-
-        return result
+        repo = CVERepository(session)
+        cves = await repo.get_cisa_kev_cves(limit=limit)
+        return [CVEResponse.model_validate(cve) for cve in cves]
 
     @app.get("/cves/recent", response_model=list[CVEResponse])
     async def list_recent_cves(
+        session: AsyncSession = Depends(get_db_session),
         hours: int = Query(default=24, ge=1, le=168, description="Horas hacia atrás"),
         limit: int = Query(default=100, ge=1, le=500, description="Máximo de resultados"),
     ):
         """
-        Listar CVEs publicados recientemente (async).
+        Listar CVEs publicados recientemente (async with DI).
 
         Parámetros:
         - hours: Horas hacia atrás (default: 24, max: 168 = 1 semana)
         - limit: Máximo de resultados
         """
-        async with CVERepository() as repo:
-            cves = await repo.get_recent_cves(hours=hours, limit=limit)
-            result = [CVEResponse.model_validate(cve) for cve in cves]
-
-        return result
+        repo = CVERepository(session)
+        cves = await repo.get_recent_cves(hours=hours, limit=limit)
+        return [CVEResponse.model_validate(cve) for cve in cves]
 
     @app.get("/cves/{cve_id}", response_model=CVEResponse)
-    async def get_cve(cve_id: str):
+    async def get_cve(
+        cve_id: str,
+        session: AsyncSession = Depends(get_db_session)
+    ):
         """
-        Obtener detalles de un CVE específico (async).
+        Obtener detalles de un CVE específico (async with DI).
 
         Parámetros:
         - cve_id: Identificador CVE (ej: CVE-2021-44228)
         """
-        async with CVERepository() as repo:
-            cve = await repo.get_by_id(cve_id)
-            if not cve:
-                raise HTTPException(status_code=404, detail=f"CVE {cve_id} no encontrado")
-            result = CVEResponse.model_validate(cve)
-
-        return result
+        repo = CVERepository(session)
+        cve = await repo.get_by_id(cve_id)
+        if not cve:
+            raise HTTPException(status_code=404, detail=f"CVE {cve_id} no encontrado")
+        return CVEResponse.model_validate(cve)
 
     @app.get("/cves/{cve_id}/summary")
     async def get_cve_summary(cve_id: str):
