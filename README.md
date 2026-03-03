@@ -243,7 +243,29 @@ API_WORKERS=4                    # Workers de Uvicorn
 
 ## 📊 Monitoreo
 
-### Ver Mensajes en Kafka
+### Kafka UI (Interfaz Web)
+
+**Kafka UI** es una interfaz web para visualizar y gestionar Kafka.
+
+```bash
+# Acceder a Kafka UI
+http://localhost:8080
+```
+
+**Características:**
+- 📋 Ver todos los topics y sus mensajes
+- 👥 Ver consumer groups y su lag
+- 📊 Estadísticas en tiempo real
+- 🔍 Buscar mensajes específicos
+- 📝 Ver configuración de brokers
+
+**Secciones principales:**
+- **Topics**: Ver todos los topics (cve.raw, cve.enriched, cve.alerts, etc.)
+- **Consumers**: Ver consumer groups y su estado
+- **Brokers**: Ver estado de los brokers de Kafka
+- **Messages**: Leer mensajes de cualquier topic
+
+### Ver Mensajes en Kafka (CLI)
 
 ```bash
 # Topic: cve.raw (CVEs crudos)

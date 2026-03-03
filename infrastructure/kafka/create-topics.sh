@@ -4,7 +4,7 @@
 # ============================================================================
 set -e
 
-KAFKA_BROKER="kafka:9092"
+KAFKA_BROKER="kafka:29092"
 
 echo "🔧 Esperando a que Kafka esté listo..."
 sleep 10
