@@ -147,36 +147,12 @@ class DatabaseConnection:
         }
 
 
-    async def initialize(self):
-        """
-        Initialize database (create tables if needed).
-
-        Note: In production, use Alembic migrations instead.
-        """
-        logger.info("Initializing database schema...")
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
-        logger.info("Database schema initialized")
-
-    async def create_tables(self):
-        """
-        Create all tables (async).
-
-        WARNING: This is for development only. Use Alembic in production.
-        """
-        logger.warning("Creating tables directly (use Alembic in production)")
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
-
-    async def drop_tables(self):
-        """
-        Drop all tables (async).
-
-        WARNING: This will delete all data!
-        """
-        logger.warning("Dropping all tables - DATA WILL BE LOST")
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
+    # ============================================================================
+    # Schema management removed - Use Alembic migrations exclusively
+    # ============================================================================
+    # Previously: initialize(), create_tables(), drop_tables()
+    # Now: Run `alembic upgrade head` to manage schema
+    # ============================================================================
 
     @asynccontextmanager
     async def get_session(self, auto_commit: bool = True) -> AsyncGenerator[AsyncSession, None]:
@@ -346,41 +322,6 @@ class DatabaseConnection:
             logger.error(f"Health check failed: {e}")
             return result
 
-    async def verify_tables_exist(self) -> Dict[str, bool]:
-        """
-        Verify that all required tables exist in the database.
-
-        Returns:
-            Dictionary mapping table names to existence status
-        """
-        tables = [
-            "cves",
-            "cisa_kev_metadata",
-            "affected_products",
-            "cve_references",
-            "cve_enrichments",
-            "cve_update_history",
-            "processing_logs",
-        ]
-
-        result = {}
-        try:
-            async with self.get_session() as session:
-                for table in tables:
-                    query = text(
-                        f"SELECT EXISTS (SELECT FROM information_schema.tables "
-                        f"WHERE table_name = '{table}')"
-                    )
-                    res = await session.execute(query)
-                    exists = res.scalar()
-                    result[table] = bool(exists)
-
-            logger.info(f"Table verification: {sum(result.values())}/{len(tables)} tables exist")
-            return result
-
-        except Exception as e:
-            logger.error(f"Table verification failed: {e}")
-            return {table: False for table in tables}
 
 
 # Global database instance

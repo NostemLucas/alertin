@@ -1,7 +1,11 @@
 """
 CVE Repository - Async CRUD operations for CVE records.
 
-Handles async database operations for CVE storage and retrieval.
+REFACTORED: Now uses SQLAlchemy relationships and cascade to automatically
+handle related data (CISA KEV metadata, references).
+
+BEFORE: 332 lines, 3 repositories coordinated manually
+AFTER: ~100 lines, 1 repository trusting cascade
 """
 
 import logging
@@ -9,13 +13,9 @@ from typing import Optional
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
-from sqlalchemy.orm import selectinload
 
-from ..connection import get_database
-from ...models.database import CVERecord, CVEEnrichmentRecord, CISAKEVMetadata
+from ...models.database import CVERecord
 from ...models.domain import CVE, SeverityLevel
-from .cisa_repository import CISAKEVRepository
-from .reference_repository import CVEReferenceRepository
 
 logger = logging.getLogger(__name__)
 
@@ -37,20 +37,26 @@ class CVERepository:
         """
         self.session = session
 
-    async def create_or_update(self, cve: CVE) -> CVERecord:
+    async def save(self, cve: CVE) -> CVERecord:
         """
-        Create or update CVE record (async).
+        Save or update CVE with all related data.
 
-        If CVE exists and has been modified, updates it.
-        Otherwise, creates new record.
+        REFACTORED: Now uses from_pydantic() and relationships to automatically
+        save to multiple tables (cves, cisa_kev_metadata, cve_references).
 
-        Note: CISA KEV metadata should be handled separately via upsert_cisa_metadata()
+        This method replaces create_or_update(), _create_record(), and _update_record()
+        with a much simpler implementation that trusts SQLAlchemy's cascade behavior.
 
         Args:
-            cve: Domain CVE model
+            cve: Domain CVE model (Pydantic)
 
         Returns:
-            Database CVE record
+            Database CVE record with all relationships populated
+
+        Example:
+            >>> cve = CVE(cve_id="CVE-2024-1234", ...)
+            >>> record = await repo.save(cve)
+            >>> # Saves to 3 tables automatically via cascade
         """
         result = await self.session.execute(
             select(CVERecord).filter_by(cve_id=cve.cve_id)
@@ -61,64 +67,22 @@ class CVERepository:
             # Check if modified
             if existing.last_modified_date != cve.last_modified_date:
                 logger.info(f"Updating CVE {cve.cve_id} (modified: {cve.last_modified_date})")
-                await self._update_record(existing, cve)
+                # ✅ Usa update_from_pydantic() - actualiza relaciones automáticamente
+                existing.update_from_pydantic(cve)
             else:
                 logger.debug(f"CVE {cve.cve_id} unchanged, skipping")
             return existing
-        else:
-            logger.info(f"Creating new CVE record: {cve.cve_id}")
-            return await self._create_record(cve)
 
-    async def _create_record(self, cve: CVE) -> CVERecord:
-        """
-        Create new CVE record from domain model (async).
+        # Create new record
+        logger.info(f"Creating new CVE record: {cve.cve_id}")
+        # ✅ Usa from_pydantic() - crea relaciones automáticamente
+        cve_record = CVERecord.from_pydantic(cve)
 
-        Note: CISA fields removed - now stored in cisa_kev_metadata table.
-        Note: References removed - now stored in cve_references table.
-        """
-        record = CVERecord(
-            cve_id=cve.cve_id,
-            description=cve.description,
-            published_date=cve.published_date,
-            last_modified_date=cve.last_modified_date,
-            cvss_v3_score=cve.cvss_v3_score,
-            cvss_v3_vector=cve.cvss_v3_vector,
-            cvss_v2_score=cve.cvss_v2_score,
-            cvss_v2_vector=cve.cvss_v2_vector,
-            severity_nist=cve.severity_nist.value,
-            is_in_cisa_kev=cve.is_in_cisa_kev,
-            final_severity=cve.final_severity.value,
-            classification_sources=[s.value for s in cve.classification_sources],
-            source_identifier=cve.source_identifier,
-            vuln_status=cve.vuln_status,
-        )
-
-        self.session.add(record)
-        await self.session.flush()  # Get ID without committing
-        return record
-
-    async def _update_record(self, record: CVERecord, cve: CVE):
-        """
-        Update existing CVE record (async).
-
-        Note: CISA fields removed - now stored in cisa_kev_metadata table.
-        Note: References removed - now stored in cve_references table.
-        """
-        record.description = cve.description
-        record.last_modified_date = cve.last_modified_date
-        record.cvss_v3_score = cve.cvss_v3_score
-        record.cvss_v3_vector = cve.cvss_v3_vector
-        record.cvss_v2_score = cve.cvss_v2_score
-        record.cvss_v2_vector = cve.cvss_v2_vector
-        record.severity_nist = cve.severity_nist.value
-        record.is_in_cisa_kev = cve.is_in_cisa_kev
-        record.final_severity = cve.final_severity.value
-        record.classification_sources = [s.value for s in cve.classification_sources]
-        record.source_identifier = cve.source_identifier
-        record.vuln_status = cve.vuln_status
-        record.updated_at = datetime.utcnow()
-
+        # ✅ session.add() guarda automáticamente en 3 tablas gracias a cascade
+        self.session.add(cve_record)
         await self.session.flush()
+
+        return cve_record
 
     async def get_by_id(self, cve_id: str) -> Optional[CVERecord]:
         """
@@ -290,42 +254,3 @@ class CVERepository:
             select(func.count(CVERecord.cve_id))
         )
         return result.scalar() or 0
-
-    async def save_complete_cve(self, cve: CVE) -> CVERecord:
-        """
-        Save complete CVE with all related data (coordinator method).
-
-        Saves to THREE tables in a single transaction:
-        1. cves (main table) - via create_or_update()
-        2. cisa_kev_metadata (if CVE in KEV)
-        3. cve_references (normalized references)
-
-        This fixes the data loss issue from the scalability migration.
-
-        Args:
-            cve: Domain CVE model
-
-        Returns:
-            CVE record from main table
-
-        Note: Session commit is handled by FastAPI dependency injection
-        """
-        logger.info(f"Saving complete CVE: {cve.cve_id}")
-
-        # 1. Save to main cves table
-        cve_record = await self.create_or_update(cve)
-
-        # 2. Save CISA KEV metadata (if applicable)
-        if cve.is_in_cisa_kev:
-            cisa_repo = CISAKEVRepository(self.session)
-            await cisa_repo.upsert_cisa_metadata(cve)
-            logger.debug(f"CISA KEV metadata saved for {cve.cve_id}")
-
-        # 3. Save references
-        if cve.references:
-            ref_repo = CVEReferenceRepository(self.session)
-            await ref_repo.bulk_upsert_references(cve)
-            logger.debug(f"References saved for {cve.cve_id}")
-
-        logger.info(f"Complete CVE saved: {cve.cve_id}")
-        return cve_record

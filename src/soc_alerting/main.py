@@ -5,6 +5,7 @@ This is the main entry point for the SOC alert system.
 Starts the FastAPI web server for CVE visualization and processing.
 """
 
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -28,11 +29,11 @@ setup_logging(
 logger = logging.getLogger(__name__)
 
 
-def main():
+async def main():
     """
-    Main entry point for the application.
+    Main entry point for the application (async).
 
-    Starts FastAPI server with uvicorn.
+    Performs database health check and starts FastAPI server with uvicorn.
     """
     logger.info("=" * 80)
     logger.info("SOC Alert System - Starting")
@@ -50,10 +51,11 @@ def main():
     logger.info("Initializing database connection...")
     db = get_database()
 
-    # Health check
+    # Health check (async)
     logger.info("Performing database health check...")
-    if db.health_check():
-        logger.info("✓ Database connection healthy")
+    health_result = await db.health_check()
+    if health_result.get("healthy"):
+        logger.info(f"✓ Database connection healthy (latency: {health_result.get('latency_ms', 'N/A')}ms)")
     else:
         logger.error("✗ Database connection failed!")
         sys.exit(1)
@@ -83,4 +85,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

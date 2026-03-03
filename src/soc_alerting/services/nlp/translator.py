@@ -3,14 +3,21 @@ CVE Translation Service (EN → ES).
 
 Provides automatic translation of CVE descriptions from English to Spanish
 using Helsinki-NLP's MarianMT model optimized for English-Spanish translation.
+
+IMPORTANT: Uses asyncio.run_in_executor to avoid blocking the event loop.
 """
 
 import logging
+import asyncio
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 from transformers import MarianMTModel, MarianTokenizer
 import torch
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for CPU-intensive NLP tasks
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nlp_translate")
 
 
 class CVETranslator:
@@ -68,7 +75,7 @@ class CVETranslator:
                 logger.error(f"Failed to load translation model: {e}", exc_info=True)
                 raise
 
-    def translate(
+    def _translate_sync(
         self,
         text: str,
         max_length: Optional[int] = None,
@@ -169,6 +176,41 @@ class CVETranslator:
                 "error": str(e)
             }
 
+    async def translate(
+        self,
+        text: str,
+        max_length: Optional[int] = None,
+        num_beams: int = 4,
+        early_stopping: bool = True
+    ) -> dict[str, any]:
+        """
+        Translate text asynchronously (non-blocking).
+
+        Runs translation in executor to avoid blocking the event loop.
+
+        Args:
+            text: English text to translate
+            max_length: Override max output length
+            num_beams: Beam search width
+            early_stopping: Stop when all beams finish
+
+        Returns:
+            Dictionary with translation results
+
+        Note:
+            This method is safe to call from FastAPI endpoints as it won't
+            block the event loop during model inference.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            _executor,
+            self._translate_sync,
+            text,
+            max_length,
+            num_beams,
+            early_stopping
+        )
+
     def _calculate_confidence(self, outputs) -> float:
         """
         Calculate translation confidence from beam search scores.
@@ -199,9 +241,9 @@ class CVETranslator:
             logger.warning(f"Failed to calculate confidence: {e}")
             return 0.75  # Default fallback
 
-    def translate_cve(self, cve_description: str) -> dict[str, any]:
+    async def translate_cve(self, cve_description: str) -> dict[str, any]:
         """
-        Translate CVE description with optimized settings for technical text.
+        Translate CVE description asynchronously with optimized settings.
 
         Args:
             cve_description: English CVE description
@@ -211,7 +253,7 @@ class CVETranslator:
 
         Example:
             >>> translator = CVETranslator()
-            >>> result = translator.translate_cve(
+            >>> result = await translator.translate_cve(
             ...     "Apache Log4j2 JNDI features do not protect against "
             ...     "attacker controlled LDAP endpoints"
             ... )
@@ -220,19 +262,19 @@ class CVETranslator:
             endpoints LDAP controlados por atacantes"
         """
         # Use higher beam search for better quality on technical text
-        return self.translate(
+        return await self.translate(
             cve_description,
             num_beams=5,  # Higher quality for CVE descriptions
             early_stopping=True
         )
 
-    def batch_translate(
+    async def batch_translate(
         self,
         texts: list[str],
         batch_size: int = 8
     ) -> list[dict[str, any]]:
         """
-        Translate multiple texts in batches for efficiency.
+        Translate multiple texts in parallel using async.
 
         Args:
             texts: List of English texts to translate
@@ -242,19 +284,33 @@ class CVETranslator:
             List of translation result dictionaries
 
         Note:
-            Batching improves throughput but requires more memory.
-            Reduce batch_size if encountering OOM errors.
+            Uses asyncio.gather for parallel execution in executor.
+            Reduces batch_size if encountering OOM errors.
         """
         results = []
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
 
-            logger.debug(f"Translating batch {i//batch_size + 1}/{len(texts)//batch_size + 1}")
+            logger.debug(f"Translating batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
 
-            for text in batch:
-                result = self.translate(text)
-                results.append(result)
+            # Translate batch in parallel
+            batch_results = await asyncio.gather(
+                *[self.translate(text) for text in batch],
+                return_exceptions=True
+            )
+
+            # Handle any exceptions
+            for result in batch_results:
+                if isinstance(result, Exception):
+                    logger.error(f"Translation error in batch: {result}")
+                    results.append({
+                        "translated_text": "",
+                        "confidence": 0.0,
+                        "error": str(result)
+                    })
+                else:
+                    results.append(result)
 
         logger.info(f"Batch translation completed: {len(results)} texts translated")
         return results

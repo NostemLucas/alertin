@@ -144,8 +144,8 @@ class CVEProcessor:
         async with db.get_session() as session:
             repo = CVERepository(session)
 
-            # Save to database (complete with references and CISA data)
-            await repo.save_complete_cve(cve)
+            # Save to database (uses relationships to save in 3 tables automatically)
+            await repo.save(cve)
 
             # Commit before enrichment
             await session.commit()
@@ -235,8 +235,8 @@ class CVEProcessor:
                     # Check if exists in DB
                     existing = await repo.get_by_id(cve.cve_id)
 
-                    # Save to database (uses save_complete_cve for 3-table insert)
-                    await repo.save_complete_cve(cve)
+                    # Save to database (uses relationships to save in 3 tables automatically)
+                    await repo.save(cve)
 
                     # Update stats
                     if existing:

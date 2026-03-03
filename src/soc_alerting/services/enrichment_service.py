@@ -122,8 +122,8 @@ class EnrichmentService:
         logger.info(f"{cve.cve_id}: Starting NLP enrichment")
 
         try:
-            # Run NLP pipeline
-            enrichment_result = self.nlp_pipeline.enrich_cve(
+            # Run NLP pipeline (async)
+            enrichment_result = await self.nlp_pipeline.enrich_cve(
                 cve_id=cve.cve_id,
                 description_en=cve.description
             )

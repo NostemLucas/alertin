@@ -135,6 +135,16 @@ class Settings(BaseSettings):
         description="Track CVE update history"
     )
 
+    # Security & Environment
+    environment: str = Field(
+        default="production",
+        description="Environment: development, staging, production"
+    )
+    debug_endpoints_enabled: bool = Field(
+        default=False,
+        description="Enable debug endpoints (SECURITY: only for development!)"
+    )
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:

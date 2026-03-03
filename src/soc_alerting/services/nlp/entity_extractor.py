@@ -6,15 +6,22 @@ Extracts technical entities from CVE descriptions including:
 - Version numbers
 - Organizations (vendors)
 - Technical terms and protocols
+
+IMPORTANT: Uses run_in_executor to avoid blocking the event loop.
 """
 
 import logging
 import re
+import asyncio
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
 import torch
 
 logger = logging.getLogger(__name__)
+
+# Thread pool for NER tasks
+_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nlp_ner")
 
 
 class CVEEntityExtractor:
@@ -86,35 +93,19 @@ class CVEEntityExtractor:
                 logger.error(f"Failed to load NER model: {e}", exc_info=True)
                 raise
 
-    def extract_entities(self, text: str, min_confidence: float = 0.5) -> dict[str, any]:
+    def _extract_entities_sync(self, text: str, min_confidence: float = 0.5) -> dict[str, any]:
         """
-        Extract entities from text using both NER model and regex patterns.
+        Extract entities from text using both NER model and regex patterns (synchronous).
 
         Args:
             text: Text to analyze
             min_confidence: Minimum confidence threshold for NER entities
 
         Returns:
-            Dictionary with extracted entities:
-                - organizations: List of org names (vendors, companies)
-                - products: List of software/product names
-                - persons: List of person names (usually empty for CVEs)
-                - locations: List of locations
-                - versions: List of version numbers
-                - cve_references: List of mentioned CVE IDs
-                - technical_terms: List of technical keywords
-                - urls: List of URLs
-                - all_entities: Complete list with metadata
+            Dictionary with extracted entities
 
-        Example:
-            >>> extractor = CVEEntityExtractor()
-            >>> result = extractor.extract_entities(
-            ...     "Apache Log4j2 2.0-beta9 through 2.15.0 JNDI features"
-            ... )
-            >>> print(result["products"])
-            ["Apache Log4j2"]
-            >>> print(result["versions"])
-            ["2.0", "2.15.0"]
+        Note:
+            This is the synchronous version. Use extract_entities() for async calls.
         """
         if not text or not text.strip():
             return self._empty_result()
@@ -149,6 +140,50 @@ class CVEEntityExtractor:
         except Exception as e:
             logger.error(f"Entity extraction failed: {e}", exc_info=True)
             return {**self._empty_result(), "error": str(e)}
+
+    async def extract_entities(self, text: str, min_confidence: float = 0.5) -> dict[str, any]:
+        """
+        Extract entities from text asynchronously (non-blocking).
+
+        Runs entity extraction in executor to avoid blocking the event loop.
+
+        Args:
+            text: Text to analyze
+            min_confidence: Minimum confidence threshold for NER entities
+
+        Returns:
+            Dictionary with extracted entities:
+                - organizations: List of org names (vendors, companies)
+                - products: List of software/product names
+                - persons: List of person names (usually empty for CVEs)
+                - locations: List of locations
+                - versions: List of version numbers
+                - cve_references: List of mentioned CVE IDs
+                - technical_terms: List of technical keywords
+                - urls: List of URLs
+                - all_entities: Complete list with metadata
+
+        Example:
+            >>> extractor = CVEEntityExtractor()
+            >>> result = await extractor.extract_entities(
+            ...     "Apache Log4j2 2.0-beta9 through 2.15.0 JNDI features"
+            ... )
+            >>> print(result["products"])
+            ["Apache Log4j2"]
+            >>> print(result["versions"])
+            ["2.0", "2.15.0"]
+
+        Note:
+            This method is safe to call from FastAPI endpoints as it won't
+            block the event loop during model inference.
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            _executor,
+            self._extract_entities_sync,
+            text,
+            min_confidence
+        )
 
     def _extract_with_patterns(self, text: str) -> dict[str, list]:
         """
@@ -243,9 +278,9 @@ class CVEEntityExtractor:
 
         return result
 
-    def extract_affected_products(self, text: str) -> list[dict[str, any]]:
+    async def extract_affected_products(self, text: str) -> list[dict[str, any]]:
         """
-        Extract affected products with version information.
+        Extract affected products with version information (async).
 
         Combines organization names, product hints, and versions to identify
         affected software products.
@@ -262,7 +297,7 @@ class CVEEntityExtractor:
 
         Example:
             >>> extractor = CVEEntityExtractor()
-            >>> products = extractor.extract_affected_products(
+            >>> products = await extractor.extract_affected_products(
             ...     "Apache Log4j2 2.0-beta9 through 2.15.0"
             ... )
             >>> print(products[0])
@@ -273,7 +308,7 @@ class CVEEntityExtractor:
                 "confidence": 0.85
             }
         """
-        entities = self.extract_entities(text)
+        entities = await self.extract_entities(text)
 
         products = []
 

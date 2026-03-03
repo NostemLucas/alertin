@@ -6,17 +6,36 @@ Coordinates all NLP components to provide comprehensive CVE enrichment:
 2. Entity extraction (NER)
 3. Keyword extraction
 4. Attack analysis
+
+REFACTORED: Now uses Pydantic models for type-safe, validated results.
+All operations run asynchronously to avoid blocking the FastAPI event loop.
 """
 
 import logging
+import asyncio
 from typing import Optional
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 from .translator import get_translator, CVETranslator
 from .entity_extractor import get_entity_extractor, CVEEntityExtractor
 from .keyword_extractor import get_keyword_extractor, CVEKeywordExtractor
 
+# Import Pydantic models for validated results
+from ...models.nlp import (
+    NLPEnrichmentResult,
+    TranslationResult,
+    EntityExtractionResult,
+    KeywordExtractionResult,
+    AttackAnalysisResult,
+    CIAImpactResult,
+    NLPEnrichmentBatchResult,
+)
+
 logger = logging.getLogger(__name__)
+
+# Thread pool for NLP tasks
+_nlp_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="nlp_pipeline")
 
 
 class NLPEnrichmentPipeline:
@@ -97,14 +116,16 @@ class NLPEnrichmentPipeline:
             self._keyword_extractor = get_keyword_extractor()
         return self._keyword_extractor
 
-    def enrich_cve(
+    async def enrich_cve(
         self,
         cve_id: str,
         description_en: str,
         min_confidence: float = 0.5
-    ) -> dict[str, any]:
+    ) -> NLPEnrichmentResult:
         """
         Perform complete NLP enrichment on a CVE description.
+
+        REFACTORED: Now returns a validated Pydantic model instead of dict[str, any].
 
         Args:
             cve_id: CVE identifier (e.g., CVE-2024-12345)
@@ -112,198 +133,260 @@ class NLPEnrichmentPipeline:
             min_confidence: Minimum confidence threshold for NER
 
         Returns:
-            Dictionary with all enrichment results:
-                - cve_id: CVE identifier
-                - enriched_at: Timestamp
-                - translation: Translation results (if enabled)
-                - entities: Extracted entities (if enabled)
-                - keywords: Extracted keywords (if enabled)
-                - attack_analysis: Attack type and characteristics
-                - cia_impact: Confidentiality, Integrity, Availability impact
+            NLPEnrichmentResult with all enrichment data:
+                - translation: Translation results (validated)
+                - entities: Extracted entities (validated)
+                - keywords: Extracted keywords (validated)
+                - attack_analysis: Attack type and characteristics (validated)
+                - cia_impact: Confidentiality, Integrity, Availability impact (validated)
                 - processing_time_ms: Total processing time
+                - errors: List of any errors encountered
 
         Example:
             >>> pipeline = NLPEnrichmentPipeline()
-            >>> result = pipeline.enrich_cve(
+            >>> result = await pipeline.enrich_cve(
             ...     "CVE-2021-44228",
             ...     "Apache Log4j2 JNDI features do not protect..."
             ... )
-            >>> print(result["translation"]["translated_text"])
+            >>> print(result.translation.description_es)  # ✅ Autocompletado
             "Las funcionalidades JNDI de Apache Log4j2 no protegen..."
+            >>> print(result.enrichment_coverage)  # ✅ Propiedad calculada
+            0.95
         """
         start_time = datetime.utcnow()
 
         logger.info(f"Starting NLP enrichment for {cve_id}")
 
-        result = {
-            "cve_id": cve_id,
-            "enriched_at": start_time.isoformat(),
-            "translation": None,
-            "entities": None,
-            "keywords": None,
-            "attack_analysis": None,
-            "cia_impact": None,
-            "processing_time_ms": 0,
-            "errors": []
-        }
+        # Variables para acumular resultados validados
+        translation_result: Optional[TranslationResult] = None
+        entity_result: Optional[EntityExtractionResult] = None
+        keyword_result: Optional[KeywordExtractionResult] = None
+        attack_result: Optional[AttackAnalysisResult] = None
+        cia_result: Optional[CIAImpactResult] = None
+        errors: list[str] = []
 
         # 1. Translation (EN → ES)
         if self.enable_translation:
             try:
                 logger.debug(f"{cve_id}: Starting translation")
-                translation_result = self.translator.translate_cve(description_en)
-                result["translation"] = {
-                    "description_es": translation_result["translated_text"],
-                    "translation_confidence": translation_result["confidence"],
-                    "translation_model": self.translation_model
-                }
+                translation_data = await self.translator.translate_cve(description_en)
+
+                # ✅ Crear modelo Pydantic validado
+                translation_result = TranslationResult(
+                    description_es=translation_data["translated_text"],
+                    confidence=translation_data["confidence"],  # Validado: 0.0-1.0
+                    model=self.translation_model
+                )
                 logger.debug(
                     f"{cve_id}: Translation completed "
-                    f"(confidence: {translation_result['confidence']:.2f})"
+                    f"(confidence: {translation_result.confidence:.2f})"
                 )
             except Exception as e:
                 logger.error(f"{cve_id}: Translation failed: {e}", exc_info=True)
-                result["errors"].append(f"Translation error: {str(e)}")
+                errors.append(f"Translation error: {str(e)}")
 
         # 2. Entity Extraction (NER)
         if self.enable_ner:
             try:
                 logger.debug(f"{cve_id}: Starting entity extraction")
-                entities = self.entity_extractor.extract_entities(
+                entities_data = await self.entity_extractor.extract_entities(
                     description_en,
                     min_confidence=min_confidence
                 )
 
                 # Also extract affected products
-                affected_products = self.entity_extractor.extract_affected_products(
+                affected_products = await self.entity_extractor.extract_affected_products(
                     description_en
                 )
 
-                result["entities"] = {
-                    "organizations": entities["organizations"],
-                    "versions": entities["versions"],
-                    "cve_references": entities["cve_references"],
-                    "urls": entities["urls"],
-                    "technical_terms": entities["technical_terms"],
-                    "affected_products_ner": affected_products,
-                    "entity_count": entities["entity_counts"]["total"],
-                    "ner_model": self.ner_model
-                }
+                # ✅ Crear modelo Pydantic validado
+                entity_result = EntityExtractionResult(
+                    organizations=entities_data["organizations"],
+                    versions=entities_data["versions"],
+                    cve_references=entities_data["cve_references"],
+                    urls=entities_data["urls"],
+                    technical_terms=entities_data["technical_terms"],
+                    affected_products_ner=affected_products,
+                    entity_count=entities_data["entity_counts"]["total"],
+                    model=self.ner_model
+                )
                 logger.debug(
                     f"{cve_id}: Entity extraction completed "
-                    f"({entities['entity_counts']['total']} entities)"
+                    f"({entity_result.entity_count} entities)"
                 )
             except Exception as e:
                 logger.error(f"{cve_id}: Entity extraction failed: {e}", exc_info=True)
-                result["errors"].append(f"Entity extraction error: {str(e)}")
+                errors.append(f"Entity extraction error: {str(e)}")
 
         # 3. Keyword Extraction
         if self.enable_keywords:
             try:
                 logger.debug(f"{cve_id}: Starting keyword extraction")
-                keywords = self.keyword_extractor.extract_keywords(description_en)
+                keywords_data = self.keyword_extractor.extract_keywords(description_en)
 
-                result["keywords"] = {
-                    "attack_vectors": keywords["attack_vectors"],
-                    "technical_protocols": keywords["technical_protocols"],
-                    "programming_concepts": keywords["programming_concepts"],
-                    "vulnerability_types": keywords["vulnerability_types"],
-                    "all_keywords": keywords["all_keywords"][:10],  # Top 10
-                    "keyword_count": keywords["keyword_count"]
-                }
+                # ✅ Crear modelo Pydantic validado
+                keyword_result = KeywordExtractionResult(
+                    attack_vectors=keywords_data["attack_vectors"],
+                    technical_protocols=keywords_data["technical_protocols"],
+                    programming_concepts=keywords_data["programming_concepts"],
+                    vulnerability_types=keywords_data["vulnerability_types"],
+                    all_keywords=keywords_data["all_keywords"][:10],  # Top 10
+                    keyword_count=keywords_data["keyword_count"]
+                )
                 logger.debug(
                     f"{cve_id}: Keyword extraction completed "
-                    f"({keywords['keyword_count']} keywords)"
+                    f"({keyword_result.keyword_count} keywords)"
                 )
             except Exception as e:
                 logger.error(f"{cve_id}: Keyword extraction failed: {e}", exc_info=True)
-                result["errors"].append(f"Keyword extraction error: {str(e)}")
+                errors.append(f"Keyword extraction error: {str(e)}")
 
         # 4. Attack Analysis
         if self.enable_keywords:
             try:
                 logger.debug(f"{cve_id}: Starting attack analysis")
-                attack_info = self.keyword_extractor.identify_attack_type(description_en)
+                attack_data = self.keyword_extractor.identify_attack_type(description_en)
 
-                result["attack_analysis"] = {
-                    "attack_type": attack_info["primary_attack_type"],
-                    "secondary_attack_types": attack_info["secondary_types"],
-                    "attack_complexity": attack_info["attack_complexity"],
-                    "requires_authentication": attack_info["requires_authentication"],
-                    "network_accessible": attack_info["network_accessible"],
-                    "analysis_confidence": attack_info["confidence"]
-                }
+                # ✅ Crear modelo Pydantic validado
+                attack_result = AttackAnalysisResult(
+                    attack_type=attack_data["primary_attack_type"],
+                    secondary_attack_types=attack_data["secondary_types"],
+                    attack_complexity=attack_data["attack_complexity"],
+                    requires_authentication=attack_data["requires_authentication"],
+                    network_accessible=attack_data["network_accessible"],
+                    confidence=attack_data["confidence"]  # Validado: 0.0-1.0
+                )
                 logger.debug(
                     f"{cve_id}: Attack analysis completed "
-                    f"(type: {attack_info['primary_attack_type']})"
+                    f"(type: {attack_result.attack_type})"
                 )
             except Exception as e:
                 logger.error(f"{cve_id}: Attack analysis failed: {e}", exc_info=True)
-                result["errors"].append(f"Attack analysis error: {str(e)}")
+                errors.append(f"Attack analysis error: {str(e)}")
 
         # 5. CIA Impact Assessment
         if self.enable_keywords:
             try:
                 logger.debug(f"{cve_id}: Starting CIA impact assessment")
-                cia_impact = self.keyword_extractor.extract_cia_impact(description_en)
+                cia_data = self.keyword_extractor.extract_cia_impact(description_en)
 
-                result["cia_impact"] = cia_impact
+                # ✅ Crear modelo Pydantic validado
+                cia_result = CIAImpactResult(
+                    confidentiality=cia_data["confidentiality"],
+                    integrity=cia_data["integrity"],
+                    availability=cia_data["availability"],
+                    overall_impact=cia_data.get("overall_impact", "UNKNOWN")
+                )
                 logger.debug(
                     f"{cve_id}: CIA impact completed "
-                    f"(C:{cia_impact['confidentiality']}, "
-                    f"I:{cia_impact['integrity']}, "
-                    f"A:{cia_impact['availability']})"
+                    f"(C:{cia_result.confidentiality}, "
+                    f"I:{cia_result.integrity}, "
+                    f"A:{cia_result.availability})"
                 )
             except Exception as e:
                 logger.error(f"{cve_id}: CIA impact assessment failed: {e}", exc_info=True)
-                result["errors"].append(f"CIA impact error: {str(e)}")
+                errors.append(f"CIA impact error: {str(e)}")
 
         # Calculate total processing time
         end_time = datetime.utcnow()
         processing_time_ms = int((end_time - start_time).total_seconds() * 1000)
-        result["processing_time_ms"] = processing_time_ms
+
+        # ✅ Construir resultado final validado
+        result = NLPEnrichmentResult(
+            cve_id=cve_id,
+            enriched_at=start_time,
+            translation=translation_result,
+            entities=entity_result,
+            keywords=keyword_result,
+            attack_analysis=attack_result,
+            cia_impact=cia_result,
+            processing_time_ms=processing_time_ms,
+            errors=errors
+        )
 
         logger.info(
             f"{cve_id}: NLP enrichment completed in {processing_time_ms}ms "
-            f"({len(result['errors'])} errors)"
+            f"(coverage: {result.enrichment_coverage:.0%}, errors: {len(errors)})"
         )
 
-        return result
+        return result  # ✅ Tipo validado NLPEnrichmentResult
 
-    def batch_enrich(
+    async def batch_enrich(
         self,
         cves: list[tuple[str, str]],
         min_confidence: float = 0.5
-    ) -> list[dict[str, any]]:
+    ) -> NLPEnrichmentBatchResult:
         """
-        Enrich multiple CVEs in batch.
+        Enrich multiple CVEs in batch asynchronously.
+
+        REFACTORED: Now returns NLPEnrichmentBatchResult with aggregate metrics.
 
         Args:
             cves: List of (cve_id, description) tuples
             min_confidence: Minimum confidence threshold
 
         Returns:
-            List of enrichment result dictionaries
-        """
-        results = []
+            NLPEnrichmentBatchResult with:
+                - Individual enrichment results
+                - Aggregate metrics (total, successful, failed)
+                - Processing time statistics
 
+        Note:
+            Processes CVEs concurrently using asyncio.gather for better performance.
+        """
+        start_time = datetime.utcnow()
         logger.info(f"Starting batch enrichment for {len(cves)} CVEs")
 
-        for cve_id, description in cves:
-            try:
-                result = self.enrich_cve(cve_id, description, min_confidence)
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Batch enrichment failed for {cve_id}: {e}", exc_info=True)
-                results.append({
-                    "cve_id": cve_id,
-                    "enriched_at": datetime.utcnow().isoformat(),
-                    "errors": [f"Enrichment failed: {str(e)}"]
-                })
+        # Process all CVEs concurrently
+        tasks = [
+            self.enrich_cve(cve_id, description, min_confidence)
+            for cve_id, description in cves
+        ]
 
-        logger.info(f"Batch enrichment completed: {len(results)} CVEs processed")
+        # Gather results, catching exceptions
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        return results
+        # Separate successful and failed results
+        successful_results: list[NLPEnrichmentResult] = []
+        failed_count = 0
+
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                cve_id = cves[i][0]
+                logger.error(f"Batch enrichment failed for {cve_id}: {result}", exc_info=True)
+                # Create error result
+                error_result = NLPEnrichmentResult(
+                    cve_id=cve_id,
+                    enriched_at=datetime.utcnow(),
+                    processing_time_ms=0,
+                    errors=[f"Enrichment failed: {str(result)}"]
+                )
+                successful_results.append(error_result)
+                failed_count += 1
+            else:
+                successful_results.append(result)
+                if result.has_errors:
+                    failed_count += 1
+
+        end_time = datetime.utcnow()
+        total_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
+        # ✅ Construir resultado de batch validado
+        batch_result = NLPEnrichmentBatchResult(
+            total_cves=len(cves),
+            successful=len(cves) - failed_count,
+            failed=failed_count,
+            results=successful_results,
+            total_processing_time_ms=total_time_ms
+        )
+
+        logger.info(
+            f"Batch enrichment completed: {len(cves)} CVEs in {total_time_ms}ms "
+            f"(success rate: {batch_result.success_rate:.0%}, "
+            f"avg time: {batch_result.average_processing_time_ms:.0f}ms)"
+        )
+
+        return batch_result  # ✅ Tipo validado NLPEnrichmentBatchResult
 
     def unload_models(self):
         """Unload all models from memory to free resources."""

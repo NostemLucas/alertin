@@ -34,6 +34,25 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+# Dependency: Check if debug endpoints are enabled
+def require_debug_mode():
+    """
+    FastAPI dependency to protect debug endpoints.
+
+    Raises 403 Forbidden if debug endpoints are not enabled.
+
+    Usage:
+        @app.get("/debug/something", dependencies=[Depends(require_debug_mode)])
+    """
+    settings = get_settings()
+    if not settings.debug_endpoints_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Debug endpoints are disabled. Set DEBUG_ENDPOINTS_ENABLED=true in production only for troubleshooting."
+        )
+    return True
+
+
 # Response models
 class CVEResponse(BaseModel):
     """CVE API response model."""
@@ -190,12 +209,17 @@ def create_app() -> FastAPI:
             logger.error(f"Error in list_cves: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/cves/debug")
+    @app.get("/cves/debug", dependencies=[Depends(require_debug_mode)])
     async def debug_cves(
         session: AsyncSession = Depends(get_db_session),
         limit: int = Query(default=1, ge=1, le=10)
     ):
-        """Debug endpoint - return raw CVE data without validation (async with DI)."""
+        """
+        Debug endpoint - return raw CVE data without validation.
+
+        SECURITY: This endpoint is protected and only accessible when
+        DEBUG_ENDPOINTS_ENABLED=true in environment configuration.
+        """
         try:
             repo = CVERepository(session)
             cves = await repo.get_all(limit=limit)
