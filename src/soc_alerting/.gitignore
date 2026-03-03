@@ -1,0 +1,99 @@
+# ============================================================================
+# SOC Alerting System - .gitignore
+# ============================================================================
+
+# ===== SECRETS & CREDENTIALS (CRITICAL) =====
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.cert
+*.crt
+credentials.json
+config.local.yml
+docker-compose.override.yml
+
+# API Keys
+*_api_key.txt
+*_secret.txt
+nist_api_key.txt
+openai_key.txt
+
+# ===== PYTHON =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# ===== DATABASE =====
+*.sql
+*.dump
+*.backup
+backups/
+db_backups/
+*.db
+*.sqlite
+*.pgpass
+
+# ===== DOCKER =====
+docker/volumes/
+postgres_data/
+redis_data/
+
+# ===== LOGS =====
+logs/
+*.log
+*.log.*
+
+# ===== IDE =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== HUGGINGFACE / ML =====
+models/cache/
+.cache/huggingface/
+transformers_cache/
+*.bin
+*.safetensors
+
+# ===== TEMPORARY =====
+tmp/
+temp/
+*.tmp
+cache/
+
+# ===== OLD BACKUPS =====
+*_old_*
+*.old
+*.bak
+
+# ===== ALLOW EXAMPLES =====
+!.env.example
+!README.md
+!MIGRATION_TO_MINIMAL_SCHEMA.md

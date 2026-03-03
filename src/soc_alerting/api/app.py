@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database.connection import get_database
 from ..database.repositories.cve_repository import CVERepository
-from ..services.cve_processor import CVEProcessor
 from ..models.domain import SeverityLevel
 from ..config.settings import get_settings
 
@@ -101,6 +100,28 @@ class ProcessingStatsResponse(BaseModel):
     cves_updated: int
     cves_in_kev: int
     by_severity: dict
+
+
+class SyncStatsResponse(BaseModel):
+    """Sync-only statistics response."""
+
+    cves_fetched: int
+    cves_processed: int
+    cves_created: int
+    cves_updated: int
+    cves_in_kev: int
+    by_severity: dict
+    checkpoint_id: Optional[str] = None
+
+
+class EnrichmentStatsResponse(BaseModel):
+    """Enrichment-only statistics response."""
+
+    total: int
+    enriched: int
+    skipped: int
+    failed: int
+    total_time_ms: int
 
 
 def create_app() -> FastAPI:
@@ -333,7 +354,7 @@ def create_app() -> FastAPI:
 
         return summary
 
-    @app.post("/process/recent", response_model=ProcessingStatsResponse)
+    @app.post("/process/recent", response_model=ProcessingStatsResponse, deprecated=True)
     async def process_recent_cves(
         hours: int = Query(default=24, ge=1, le=168, description="Horas hacia atrás"),
         max_cves: Optional[int] = Query(
@@ -341,9 +362,15 @@ def create_app() -> FastAPI:
         ),
     ):
         """
-        Procesar CVEs modificados recientemente.
+        DEPRECATED: Usar /sync/recent para sincronización, /enrich/recent para enrichment.
 
-        Este endpoint ejecuta el pipeline completo:
+        Este endpoint será eliminado en v2.0.
+
+        Use los nuevos endpoints separados:
+        - POST /sync/recent - Sincronización pura (rápido)
+        - POST /enrich/recent - Enrichment NLP (lento)
+
+        Este endpoint ejecuta el pipeline completo (sync + enrichment):
         1. Fetch de NIST NVD (CVEs modificados en últimas N horas)
         2. Verificación con CISA KEV
         3. Aplicación de regla de override (KEV → CRITICAL)
@@ -355,21 +382,33 @@ def create_app() -> FastAPI:
 
         Retorna estadísticas del procesamiento.
         """
-        logger.info(f"Iniciando procesamiento: last {hours}h, max {max_cves} CVEs")
+        logger.warning("DEPRECATED: /process/recent endpoint used. Use /sync/recent + /enrich/recent")
 
-        async with CVEProcessor() as processor:
-            stats = await processor.process_recent_cves(
+        logger.info(f"Iniciando procesamiento (DEPRECATED): last {hours}h, max {max_cves} CVEs")
+
+        # Delegate to new sync service
+        from ..services.cve_sync_service import CVESyncService
+
+        async with CVESyncService() as sync_service:
+            stats = await sync_service.sync_recent_cves(
                 hours_back=hours,
                 max_cves=max_cves,
+                checkpoint_type="api_process_recent_deprecated"
             )
 
-        logger.info(f"Procesamiento completado: {stats}")
+        logger.info(f"Procesamiento completado (sync only, no enrichment): {stats}")
         return stats
 
-    @app.post("/process/cve/{cve_id}")
+    @app.post("/process/cve/{cve_id}", deprecated=True)
     async def process_specific_cve(cve_id: str):
         """
-        Procesar un CVE específico.
+        DEPRECATED: Usar /sync/cve/{cve_id} para sync, /enrich/cve/{cve_id} para enrichment.
+
+        Este endpoint será eliminado en v2.0.
+
+        Use los nuevos endpoints separados:
+        - POST /sync/cve/{cve_id} - Sincronización pura
+        - POST /enrich/cve/{cve_id} - Enrichment NLP
 
         Ejecuta el pipeline completo para un CVE individual:
         1. Fetch de NIST
@@ -379,8 +418,13 @@ def create_app() -> FastAPI:
         Parámetros:
         - cve_id: Identificador CVE (ej: CVE-2021-44228)
         """
-        async with CVEProcessor() as processor:
-            cve = await processor.process_specific_cve(cve_id)
+        logger.warning(f"DEPRECATED: /process/cve/{cve_id} endpoint used. Use /sync/cve + /enrich/cve")
+
+        # Delegate to new sync service
+        from ..services.cve_sync_service import CVESyncService
+
+        async with CVESyncService() as sync_service:
+            cve = await sync_service.sync_specific_cve(cve_id)
 
         if not cve:
             raise HTTPException(status_code=404, detail=f"CVE {cve_id} no encontrado en NIST")
@@ -391,6 +435,252 @@ def create_app() -> FastAPI:
             "final_severity": cve.final_severity.value,
             "is_in_cisa_kev": cve.is_in_cisa_kev,
             "message": f"CVE {cve_id} procesado exitosamente",
+        }
+
+    # ==================== SYNC ENDPOINTS (NEW) ====================
+
+    @app.post("/sync/recent", response_model=SyncStatsResponse)
+    async def sync_recent_cves(
+        hours: int = Query(default=24, ge=1, le=168, description="Horas hacia atrás"),
+        max_cves: Optional[int] = Query(
+            default=None, ge=1, le=1000, description="Máximo de CVEs a sincronizar"
+        ),
+    ):
+        """
+        Sincronizar CVEs modificados recientemente (PURE SYNC - SIN ENRICHMENT).
+
+        Este endpoint ejecuta SOLO el flujo de sincronización:
+        1. Fetch de NIST NVD (CVEs modificados en últimas N horas)
+        2. Verificación con CISA KEV
+        3. Aplicación de regla de override (KEV → CRITICAL)
+        4. Guardado en base de datos
+        5. Tracking con checkpoint para recuperación de crash
+
+        Para enriquecimiento NLP, usar /enrich/recent
+
+        Parámetros:
+        - hours: Horas hacia atrás para buscar CVEs (default: 24)
+        - max_cves: Máximo de CVEs a procesar (default: todos)
+
+        Retorna estadísticas de sincronización incluyendo checkpoint_id.
+        """
+        from ..services.cve_sync_service import CVESyncService
+
+        logger.info(f"Iniciando sync: last {hours}h, max {max_cves} CVEs")
+
+        async with CVESyncService() as sync_service:
+            stats = await sync_service.sync_recent_cves(
+                hours_back=hours,
+                max_cves=max_cves,
+                checkpoint_type="api_sync_recent"
+            )
+
+        logger.info(f"Sync completado: {stats}")
+        return stats
+
+    @app.post("/sync/cve/{cve_id}")
+    async def sync_specific_cve(cve_id: str):
+        """
+        Sincronizar un CVE específico (PURE SYNC - SIN ENRICHMENT).
+
+        Ejecuta SOLO sincronización para un CVE individual:
+        1. Fetch de NIST
+        2. Verificación CISA KEV
+        3. Guardado en BD
+
+        Para enriquecimiento NLP, usar /enrich/cve/{cve_id}
+
+        Parámetros:
+        - cve_id: Identificador CVE (ej: CVE-2021-44228)
+        """
+        from ..services.cve_sync_service import CVESyncService
+
+        async with CVESyncService() as sync_service:
+            cve = await sync_service.sync_specific_cve(cve_id)
+
+        if not cve:
+            raise HTTPException(status_code=404, detail=f"CVE {cve_id} no encontrado en NIST")
+
+        return {
+            "cve_id": cve.cve_id,
+            "severity_nist": cve.severity_nist.value,
+            "final_severity": cve.final_severity.value,
+            "is_in_cisa_kev": cve.is_in_cisa_kev,
+            "message": f"CVE {cve_id} sincronizado exitosamente (sin enrichment)"
+        }
+
+    @app.get("/sync/checkpoints")
+    async def list_sync_checkpoints(
+        limit: int = Query(default=10, ge=1, le=100, description="Máximo de checkpoints"),
+        session: AsyncSession = Depends(get_db_session)
+    ):
+        """
+        Listar checkpoints de sincronización recientes (para monitoring).
+
+        Útil para:
+        - Monitorear progreso de syncs
+        - Identificar syncs fallidos
+        - Recuperar de crashes
+
+        Retorna lista de checkpoints ordenados por fecha (más recientes primero).
+        """
+        from sqlalchemy import select
+        from ..models.database import SyncCheckpoint
+
+        result = await session.execute(
+            select(SyncCheckpoint)
+            .order_by(SyncCheckpoint.started_at.desc())
+            .limit(limit)
+        )
+        checkpoints = result.scalars().all()
+
+        return [
+            {
+                "id": str(c.id),
+                "checkpoint_type": c.checkpoint_type,
+                "status": c.status,
+                "started_at": c.started_at.isoformat() if c.started_at else None,
+                "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+                "total_cves_processed": c.total_cves_processed,
+                "last_processed_cve_id": c.last_processed_cve_id,
+                "error_message": c.error_message,
+            }
+            for c in checkpoints
+        ]
+
+    @app.post("/sync/resume/{checkpoint_id}")
+    async def resume_sync(checkpoint_id: str):
+        """
+        Resumir sync desde un checkpoint fallido o incompleto.
+
+        Útil para recuperación de crashes. El sync continuará desde
+        el último CVE procesado exitosamente.
+
+        Parámetros:
+        - checkpoint_id: UUID del checkpoint a resumir
+        """
+        from ..services.cve_sync_service import CVESyncService
+
+        logger.info(f"Resumiendo sync desde checkpoint: {checkpoint_id}")
+
+        try:
+            async with CVESyncService() as sync_service:
+                stats = await sync_service.resume_from_checkpoint(checkpoint_id)
+
+            logger.info(f"Sync resumido exitosamente: {stats}")
+            return stats
+
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Error resuming sync: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ==================== ENRICHMENT ENDPOINTS (NEW) ====================
+
+    @app.post("/enrich/recent", response_model=EnrichmentStatsResponse)
+    async def enrich_recent_cves(
+        hours: int = Query(default=24, ge=1, le=168, description="Horas hacia atrás"),
+        min_severity: Optional[str] = Query(default=None, description="Severidad mínima"),
+        force: bool = Query(default=False, description="Forzar enrichment"),
+        session: AsyncSession = Depends(get_db_session)
+    ):
+        """
+        Enriquecer CVEs recientes con análisis NLP (SEPARADO DEL SYNC).
+
+        Este endpoint ejecuta SOLO el flujo de enrichment:
+        1. Query CVEs desde base de datos (NO desde NIST!)
+        2. Filtrar por severidad threshold
+        3. Traducir EN→ES
+        4. Extraer entidades (NER)
+        5. Analizar keywords
+        6. Guardar enrichment en base de datos
+
+        Parámetros:
+        - hours: Horas hacia atrás para buscar CVEs
+        - min_severity: Severidad mínima (LOW, MEDIUM, HIGH, CRITICAL)
+        - force: Forzar enrichment incluso si está bajo threshold
+
+        Retorna estadísticas de enrichment.
+        """
+        from ..services.enrichment_service import create_enrichment_service_from_settings
+
+        logger.info(f"Iniciando enrichment: last {hours}h, min_severity={min_severity}")
+
+        # Parse severity if provided
+        min_sev = None
+        if min_severity:
+            try:
+                min_sev = SeverityLevel(min_severity.upper())
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Severidad inválida. Use: LOW, MEDIUM, HIGH, CRITICAL"
+                )
+
+        enrichment_service = create_enrichment_service_from_settings()
+
+        stats = await enrichment_service.enrich_recent_cves(
+            session=session,
+            hours_back=hours,
+            min_severity=min_sev
+        )
+
+        logger.info(f"Enrichment completado: {stats}")
+        return stats
+
+    @app.post("/enrich/cve/{cve_id}")
+    async def enrich_specific_cve(
+        cve_id: str,
+        force: bool = Query(default=True, description="Forzar enrichment"),
+        session: AsyncSession = Depends(get_db_session)
+    ):
+        """
+        Enriquecer un CVE específico con análisis NLP.
+
+        El CVE debe existir en la base de datos (usar /sync/cve/{id} primero si no existe).
+
+        Parámetros:
+        - cve_id: Identificador CVE
+        - force: Forzar enrichment incluso si está bajo threshold (default: true)
+        """
+        from ..services.enrichment_service import create_enrichment_service_from_settings
+
+        # Get CVE from database
+        repo = CVERepository(session)
+        cve_record = await repo.get_by_id(cve_id)
+
+        if not cve_record:
+            raise HTTPException(
+                status_code=404,
+                detail=f"CVE {cve_id} no encontrado en base de datos. Usar /sync/cve/{cve_id} primero."
+            )
+
+        # Convert to domain model
+        enrichment_service = create_enrichment_service_from_settings()
+        cve = enrichment_service._record_to_domain(cve_record)
+
+        # Enrich
+        logger.info(f"Enriching {cve_id}...")
+        enrichment_record = await enrichment_service.enrich_cve(
+            session=session,
+            cve=cve,
+            force=force
+        )
+
+        await session.commit()
+
+        if not enrichment_record:
+            return {
+                "cve_id": cve_id,
+                "message": f"CVE {cve_id} no enriquecido (bajo threshold de severidad)"
+            }
+
+        return {
+            "cve_id": cve_id,
+            "enrichment_id": str(enrichment_record.id),
+            "processing_time_ms": enrichment_record.processing_time_ms,
+            "message": f"CVE {cve_id} enriquecido exitosamente"
         }
 
     return app

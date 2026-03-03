@@ -15,6 +15,15 @@ from .base_client import RateLimitedClient
 from ..config.settings import get_settings
 from ..models.nist import NISTAPIResponse, NISTVulnerability
 from ..models.domain import CVE, SeverityLevel, ClassificationSource
+from ..models.domain_minimal import (
+    CVEMinimal,
+    SeverityLevel as SeverityLevelMinimal,
+    AttackVector,
+    AttackComplexity,
+    cvss_score_to_severity,
+    parse_cvss_vector,
+    parse_cpe_to_simple_product,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -347,6 +356,166 @@ class NISTClient(RateLimitedClient):
         )
 
         return cve
+
+    def convert_to_minimal_domain_model(
+        self,
+        nist_vuln: NISTVulnerability,
+        is_in_cisa_kev: bool = False,
+    ) -> CVEMinimal:
+        """
+        Convert NIST vulnerability to MINIMAL domain CVE model.
+
+        Extracts 17 critical fields including:
+        - CWE ID
+        - CVSS vector components (attack_vector, attack_complexity, etc.)
+        - Simplified affected products
+        - Primary reference
+
+        Args:
+            nist_vuln: NIST vulnerability object
+            is_in_cisa_kev: Whether CVE is in CISA KEV catalog
+
+        Returns:
+            Minimal CVE domain model
+        """
+        # Get CVSS data
+        cvss_score = nist_vuln.get_primary_cvss_v3()
+        cvss_vector = nist_vuln.get_primary_cvss_v3_vector()
+
+        # Calculate severity from CVSS score
+        severity = cvss_score_to_severity(cvss_score)
+
+        # Extract CWE ID (primary only)
+        cwe_ids = nist_vuln.get_cwe_ids()
+        cwe_id = cwe_ids[0] if cwe_ids else None
+
+        # Parse CVSS vector to extract attack characteristics
+        vector_components = parse_cvss_vector(cvss_vector)
+
+        # Map attack vector
+        attack_vector_str = vector_components.get("attack_vector")
+        attack_vector = None
+        if attack_vector_str:
+            try:
+                attack_vector = AttackVector(attack_vector_str)
+            except ValueError:
+                attack_vector = None
+
+        # Map attack complexity
+        attack_complexity_str = vector_components.get("attack_complexity")
+        attack_complexity = None
+        if attack_complexity_str:
+            try:
+                attack_complexity = AttackComplexity(attack_complexity_str)
+            except ValueError:
+                attack_complexity = None
+
+        # Requires authentication? (PR != N means auth required)
+        privileges_required = vector_components.get("privileges_required")
+        requires_auth = privileges_required not in (None, "N", "NONE")
+
+        # User interaction required? (UI != N means required)
+        user_interaction = vector_components.get("user_interaction")
+        user_interaction_required = user_interaction not in (None, "N", "NONE")
+
+        # Extract affected products (simplified)
+        affected_products = self._extract_simple_affected_products(nist_vuln)
+
+        # Get references
+        reference_urls = nist_vuln.get_reference_urls()
+        primary_reference = reference_urls[0] if reference_urls else None
+
+        # Create minimal domain model
+        cve = CVEMinimal(
+            cve_id=nist_vuln.id,
+            description=nist_vuln.get_english_description(),
+            cwe_id=cwe_id,
+            cvss_score=cvss_score,
+            cvss_vector=cvss_vector,
+            severity=severity,
+            attack_vector=attack_vector,
+            attack_complexity=attack_complexity,
+            requires_auth=requires_auth,
+            user_interaction_required=user_interaction_required,
+            affected_products=affected_products,
+            version=1,
+            status_nist=nist_vuln.vulnStatus,
+            source=nist_vuln.sourceIdentifier,
+            published_date=nist_vuln.published,
+            last_modified_date=nist_vuln.lastModified,
+            is_in_cisa_kev=is_in_cisa_kev,
+            primary_reference=primary_reference,
+            references=reference_urls,
+        )
+
+        logger.debug(
+            f"Converted to minimal: {cve.cve_id} | "
+            f"CVSS={cvss_score} | Severity={severity} | "
+            f"CWE={cwe_id} | Vector={attack_vector} | "
+            f"KEV={is_in_cisa_kev} | Risk={cve.risk_score}"
+        )
+
+        return cve
+
+    @staticmethod
+    def _extract_simple_affected_products(nist_vuln: NISTVulnerability) -> list[dict]:
+        """
+        Extract simplified affected products from CPE data.
+
+        Groups by vendor/product and collects versions.
+
+        Returns:
+            List of dicts: [{"vendor": "apache", "product": "log4j", "versions": ["2.0", "2.14.1"]}]
+        """
+        products_map = {}  # Key: (vendor, product), Value: set of versions
+
+        # Iterate through all configurations
+        for config in nist_vuln.configurations:
+            for node in config.nodes:
+                for cpe_match in node.cpeMatch:
+                    if not cpe_match.vulnerable:
+                        continue
+
+                    # Parse CPE URI
+                    product_info = parse_cpe_to_simple_product(cpe_match.criteria)
+                    if not product_info:
+                        continue
+
+                    vendor = product_info["vendor"]
+                    product = product_info["product"]
+                    version = product_info.get("version")
+
+                    # Create key
+                    key = (vendor, product)
+
+                    # Initialize set if needed
+                    if key not in products_map:
+                        products_map[key] = set()
+
+                    # Add version (handle ranges)
+                    if version:
+                        products_map[key].add(version)
+
+                    # Add version range info if present
+                    if cpe_match.versionStartIncluding:
+                        products_map[key].add(f">={cpe_match.versionStartIncluding}")
+                    if cpe_match.versionStartExcluding:
+                        products_map[key].add(f">{cpe_match.versionStartExcluding}")
+                    if cpe_match.versionEndIncluding:
+                        products_map[key].add(f"<={cpe_match.versionEndIncluding}")
+                    if cpe_match.versionEndExcluding:
+                        products_map[key].add(f"<{cpe_match.versionEndExcluding}")
+
+        # Convert to list format
+        products = []
+        for (vendor, product), versions in products_map.items():
+            products.append({
+                "vendor": vendor,
+                "product": product,
+                "versions": sorted(list(versions))
+            })
+
+        return products
 
     @staticmethod
     def _cvss_to_severity(cvss_score: Optional[float]) -> SeverityLevel:

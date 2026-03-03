@@ -263,6 +263,97 @@ class EnrichmentService:
 
         return stats
 
+    async def enrich_recent_cves(
+        self,
+        session: AsyncSession,
+        hours_back: int = 24,
+        min_severity: Optional[SeverityLevel] = None
+    ) -> dict:
+        """
+        Enrich recent CVEs from database (NOT from NIST API).
+
+        This method queries CVEs from the database and enriches them.
+        Useful for batch enrichment jobs that run after sync.
+
+        Args:
+            session: Async database session
+            hours_back: Query CVEs from last N hours (default: 24)
+            min_severity: Optional severity filter (overrides threshold)
+
+        Returns:
+            Dictionary with enrichment statistics
+        """
+        from ..database.repositories.cve_repository import CVERepository
+
+        logger.info(f"Enriching recent CVEs: last {hours_back} hours")
+
+        # Get recent CVEs from DATABASE (not NIST)
+        repo = CVERepository(session)
+        cve_records = await repo.get_recent_cves(hours=hours_back, limit=1000)
+
+        if not cve_records:
+            logger.info("No recent CVEs found in database")
+            return {
+                "total": 0,
+                "enriched": 0,
+                "skipped": 0,
+                "failed": 0,
+                "total_time_ms": 0
+            }
+
+        # Convert DB records to domain models
+        cves = [self._record_to_domain(r) for r in cve_records]
+
+        # Filter by severity if specified
+        if min_severity:
+            # Temporarily override threshold
+            original_threshold = self.enrich_severity_threshold
+            self.enrich_severity_threshold = min_severity
+            logger.info(f"Using min_severity={min_severity} (overrides threshold)")
+
+        # Batch enrich
+        stats = await self.batch_enrich(session, cves, force=False)
+
+        # Restore original threshold
+        if min_severity:
+            self.enrich_severity_threshold = original_threshold
+
+        logger.info(f"Recent CVE enrichment completed: {stats}")
+        return stats
+
+    def _record_to_domain(self, record: CVERecord) -> CVE:
+        """
+        Convert CVERecord (database model) to CVE (domain model).
+
+        Args:
+            record: CVERecord from database
+
+        Returns:
+            CVE domain model
+        """
+        return CVE(
+            cve_id=record.cve_id,
+            description=record.description,
+            published_date=record.published_date,
+            last_modified_date=record.last_modified_date,
+            cvss_v3_score=record.cvss_v3_score,
+            cvss_v3_vector=record.cvss_v3_vector,
+            cvss_v2_score=record.cvss_v2_score,
+            cvss_v2_vector=record.cvss_v2_vector,
+            severity_nist=SeverityLevel(record.severity_nist),
+            is_in_cisa_kev=record.is_in_cisa_kev,
+            final_severity=SeverityLevel(record.final_severity),
+            classification_sources=[],  # Not needed for enrichment
+            source_identifier=record.source_identifier,
+            vuln_status=record.vuln_status,
+            references=[],  # Not needed for enrichment
+            cisa_exploit_add=record.cisa_exploit_add,
+            cisa_action_due=record.cisa_action_due,
+            cisa_required_action=record.cisa_required_action,
+            cisa_vulnerability_name=record.cisa_vulnerability_name,
+            cisa_known_ransomware=record.cisa_known_ransomware or False
+        )
+
     async def re_enrich_cve(
         self,
         session: AsyncSession,

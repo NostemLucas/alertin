@@ -16,6 +16,7 @@ from .base_client import BaseAPIClient
 from ..config.settings import get_settings
 from ..models.cisa import CISAKEVCatalog, CISAVulnerability
 from ..models.domain import CVE, SeverityLevel, ClassificationSource
+from ..models.domain_minimal import CVEMinimal, SeverityLevel as SeverityLevelMinimal
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,49 @@ class CISAClient(BaseAPIClient):
             logger.info(
                 f"{cve.cve_id} enriched with CISA KEV data: "
                 f"severity changed to {cve.final_severity}"
+            )
+        else:
+            logger.debug(f"{cve.cve_id} not in CISA KEV")
+
+        return cve
+
+    async def enrich_cve_minimal(self, cve: CVEMinimal) -> CVEMinimal:
+        """
+        Enrich minimal CVE model with CISA KEV data.
+
+        If the CVE is in CISA KEV:
+        - Sets is_in_cisa_kev = True
+        - Adds CISA metadata (dateAdded, dueDate, requiredAction, knownRansomware)
+        - severity will be automatically set to CRITICAL by Pydantic validator
+
+        Args:
+            cve: Minimal CVE domain model
+
+        Returns:
+            Enriched CVE (same object, modified in place)
+        """
+        kev_entry = await self.get_kev_entry(cve.cve_id)
+
+        if kev_entry:
+            logger.info(
+                f"{cve.cve_id} found in CISA KEV "
+                f"(added: {kev_entry.dateAdded}, due: {kev_entry.dueDate})"
+            )
+
+            # Update CVE with CISA data
+            cve.is_in_cisa_kev = True
+            cve.cisa_date_added = kev_entry.dateAdded
+            cve.cisa_due_date = kev_entry.dueDate
+            cve.cisa_required_action = kev_entry.requiredAction
+            cve.cisa_known_ransomware = kev_entry.is_known_ransomware
+
+            # Pydantic validator will automatically set severity to CRITICAL
+            cve.severity = SeverityLevelMinimal.CRITICAL
+
+            logger.info(
+                f"{cve.cve_id} enriched with CISA KEV: "
+                f"severity={cve.severity}, ransomware={cve.cisa_known_ransomware}, "
+                f"risk_score={cve.risk_score}"
             )
         else:
             logger.debug(f"{cve.cve_id} not in CISA KEV")

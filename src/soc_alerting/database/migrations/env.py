@@ -13,12 +13,24 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# Add project root to path
-project_root = Path(__file__).parents[4]
+# Add project root to path using more robust approach
+# Instead of hardcoding parents[4], find project root by looking for pyproject.toml
+def find_project_root(start_path: Path) -> Path:
+    """Find project root by searching for pyproject.toml or setup.py."""
+    current = start_path
+    while current != current.parent:
+        if (current / "pyproject.toml").exists() or (current / "setup.py").exists():
+            return current
+        current = current.parent
+    # Fallback to hardcoded if not found (shouldn't happen)
+    return start_path.parents[4]
+
+project_root = find_project_root(Path(__file__))
 sys.path.insert(0, str(project_root))
 
-# Import models and settings
-from src.soc_alerting.models.database import Base
+
+# Using minimal database model for streamlined schema
+from src.soc_alerting.models.database_minimal import Base
 from src.soc_alerting.config.settings import get_settings
 
 # this is the Alembic Config object

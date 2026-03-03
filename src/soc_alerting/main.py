@@ -17,6 +17,7 @@ from soc_alerting.config.settings import get_settings
 from soc_alerting.config.logging_config import setup_logging
 from soc_alerting.database.connection import get_database
 from soc_alerting.api.app import create_app
+from soc_alerting.scheduler import get_scheduler
 
 # Setup logging
 settings = get_settings()
@@ -74,6 +75,17 @@ async def main():
     import uvicorn
 
     app = create_app()
+
+    # Start background scheduler (if enabled)
+    if settings.enable_scheduler:
+        logger.info("Starting background scheduler...")
+        scheduler = get_scheduler()
+        await scheduler.start()
+        logger.info("✓ Background scheduler started")
+    else:
+        logger.info("Background scheduler disabled (ENABLE_SCHEDULER=false)")
+
+    logger.info("")
 
     uvicorn.run(
         app,
