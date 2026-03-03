@@ -1,45 +1,254 @@
+# ============================================================================
+# SOC Alerting System - Microservices Architecture with Kafka
+# ============================================================================
+version: '3.8'
+
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: soc_alerting_db
+  # ==========================================================================
+  # INFRASTRUCTURE: Zookeeper
+  # ==========================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: soc-zookeeper
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: soc_user
-      POSTGRES_PASSWORD: secure_password
-      POSTGRES_DB: soc_alerting
-      PGDATA: /var/lib/postgresql/data/pgdata
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # INFRASTRUCTURE: Kafka
+  # ==========================================================================
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: soc-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
     ports:
-      - "5433:5432"  # Changed to 5433 to avoid conflict with local PostgreSQL
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    networks:
+      - soc-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # ==========================================================================
+  # INFRASTRUCTURE: Kafka Topic Creator
+  # ==========================================================================
+  kafka-init:
+    image: confluentinc/cp-kafka:latest
+    container_name: soc-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./infrastructure/kafka/create-topics.sh:/create-topics.sh
+    command: bash -c "/create-topics.sh"
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # INFRASTRUCTURE: PostgreSQL
+  # ==========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: soc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-soc_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${POSTGRES_DB:-soc_alerting}
+      POSTGRES_SHARED_BUFFERS: 256MB
+      POSTGRES_MAX_CONNECTIONS: 200
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U soc_user -d soc_alerting"]
+      test: ["CMD-SHELL", "pg_isready -U soc_user"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - soc_network
+      - soc-network
 
-  # Optional: pgAdmin for database management
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: soc_alerting_pgadmin
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@soc-alerting.local
-      PGADMIN_DEFAULT_PASSWORD: admin
-      PGADMIN_CONFIG_SERVER_MODE: "False"
+  # ==========================================================================
+  # INFRASTRUCTURE: Redis
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: soc-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
     ports:
-      - "5050:80"
-    depends_on:
-      - postgres
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     networks:
-      - soc_network
-    profiles:
-      - tools # Only start with: docker-compose --profile tools up
+      - soc-network
 
+  # ==========================================================================
+  # SERVICE 1: CVE Scraper (NIST/CISA)
+  # ==========================================================================
+  cve-scraper:
+    build:
+      context: .
+      dockerfile: services/cve-scraper/Dockerfile
+    container_name: soc-cve-scraper
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      # NIST API
+      NIST_API_KEY: ${NIST_API_KEY:-}
+      NIST_RATE_LIMIT_DELAY: ${NIST_RATE_LIMIT_DELAY:-6.0}
+
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CLIENT_ID: cve-scraper
+
+      # Scheduler
+      SCRAPER_INTERVAL_MINUTES: ${SCRAPER_INTERVAL_MINUTES:-60}
+      SCRAPER_HOURS_BACK: ${SCRAPER_HOURS_BACK:-24}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # SERVICE 2: CVE Processor (Enrichment/NLP)
+  # ==========================================================================
+  cve-processor:
+    build:
+      context: .
+      dockerfile: services/cve-processor/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${PROCESSOR_REPLICAS:-3}
+    environment:
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CLIENT_ID: cve-processor
+      KAFKA_CONSUMER_GROUP_ID: cve-processor-group
+
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-soc_user}:${POSTGRES_PASSWORD:-CHANGE_ME}@postgres:5432/${POSTGRES_DB:-soc_alerting}
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+
+      # NLP
+      ENABLE_ENRICHMENT: ${ENABLE_ENRICHMENT:-true}
+      ENRICH_SEVERITY_THRESHOLD: ${ENRICH_SEVERITY_THRESHOLD:-HIGH}
+      HF_MODEL_NAME: ${HF_MODEL_NAME:-distilbert-base-uncased}
+      HF_DEVICE: ${HF_DEVICE:--1}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # SERVICE 3: Alert Manager (Rules/Filters)
+  # ==========================================================================
+  alert-manager:
+    build:
+      context: .
+      dockerfile: services/alert-manager/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      replicas: ${ALERT_MANAGER_REPLICAS:-2}
+    environment:
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CLIENT_ID: alert-manager
+      KAFKA_CONSUMER_GROUP_ID: alert-manager-group
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # SERVICE 4: API Gateway (FastAPI)
+  # ==========================================================================
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: soc-api-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-soc_user}:${POSTGRES_PASSWORD:-CHANGE_ME}@postgres:5432/${POSTGRES_DB:-soc_alerting}
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+
+      # API
+      API_WORKERS: ${API_WORKERS:-4}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ============================================================================
+# VOLUMES
+# ============================================================================
 volumes:
   postgres_data:
     driver: local
+  redis_data:
+    driver: local
 
+# ============================================================================
+# NETWORKS
+# ============================================================================
 networks:
-  soc_network:
+  soc-network:
     driver: bridge
