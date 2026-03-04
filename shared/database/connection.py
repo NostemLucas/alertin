@@ -19,7 +19,6 @@ import asyncio
 from datetime import datetime
 
 from ..config.settings import get_settings
-from ..models.database import Base
 from ..models.statistics import PoolStatistics
 
 logger = logging.getLogger(__name__)

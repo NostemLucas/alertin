@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func, and_, or_
 
-from ...models.database_minimal import CVERecord, CVEUpdateHistory, ProcessingLog
-from ...models.domain_minimal import CVEMinimal, SeverityLevel
+from ...models.db_models import CVERecord, CVEUpdateHistory, ProcessingLog
+from ...models.domain import CVEMinimal, SeverityLevel
 from ...models.statistics import CVEStatistics
 
 logger = logging.getLogger(__name__)

@@ -14,8 +14,8 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "shared"))
 
 from shared.database.connection import get_database
-from shared.models.database_minimal import CVERecord
-from shared.models.domain_minimal import SeverityLevel, AttackVector, AttackComplexity
+from shared.models.db_models import CVERecord
+from shared.models.domain import SeverityLevel, AttackVector, AttackComplexity
 from sqlalchemy import text
 import logging
 
@@ -55,7 +55,7 @@ async def create_tables():
     try:
         async with db.get_session() as session:
             # Import Base to create tables
-            from shared.models.database_minimal import Base
+            from shared.models.db_models import Base
 
             # Create all tables
             async with db.engine.begin() as conn:
@@ -141,7 +141,7 @@ async def seed_sample_cves():
             for cve_data in sample_cves:
                 # Check if CVE already exists
                 result = await session.execute(
-                    text("SELECT cve_id FROM cve_records WHERE cve_id = :cve_id"),
+                    text("SELECT cve_id FROM cves WHERE cve_id = :cve_id"),
                     {"cve_id": cve_data["cve_id"]}
                 )
                 exists = result.scalar()
@@ -173,13 +173,13 @@ async def show_statistics():
     try:
         async with db.get_session() as session:
             # Total CVEs
-            result = await session.execute(text("SELECT COUNT(*) FROM cve_records"))
+            result = await session.execute(text("SELECT COUNT(*) FROM cves"))
             total = result.scalar()
             logger.info(f"  Total CVEs: {total}")
 
             # By severity
             result = await session.execute(
-                text("SELECT severity, COUNT(*) FROM cve_records GROUP BY severity")
+                text("SELECT severity, COUNT(*) FROM cves GROUP BY severity")
             )
             logger.info("  By Severity:")
             for row in result:
@@ -187,7 +187,7 @@ async def show_statistics():
 
             # CISA KEV
             result = await session.execute(
-                text("SELECT COUNT(*) FROM cve_records WHERE is_in_cisa_kev = true")
+                text("SELECT COUNT(*) FROM cves WHERE is_in_cisa_kev = true")
             )
             kev_count = result.scalar()
             logger.info(f"  CISA KEV: {kev_count}")

@@ -14,24 +14,31 @@ from sqlalchemy import pool
 from alembic import context
 
 # Add project root to path using more robust approach
-# Instead of hardcoding parents[4], find project root by looking for pyproject.toml
+# Find project root by looking for common project markers
 def find_project_root(start_path: Path) -> Path:
-    """Find project root by searching for pyproject.toml or setup.py."""
+    """Find project root by searching for project markers like .git, docker-compose.yml, etc."""
     current = start_path
     while current != current.parent:
-        if (current / "pyproject.toml").exists() or (current / "setup.py").exists():
+        # Check for various project markers
+        if (
+            (current / ".git").exists()
+            or (current / "pyproject.toml").exists()
+            or (current / "setup.py").exists()
+            or (current / "docker-compose.yml").exists()
+            or (current / "alembic.ini").exists()
+        ):
             return current
         current = current.parent
     # Fallback to hardcoded if not found (shouldn't happen)
     return start_path.parents[4]
 
 project_root = find_project_root(Path(__file__))
-sys.path.insert(0, str(project_root))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-
-# Using minimal database model for streamlined schema
-from src.soc_alerting.models.database_minimal import Base
-from src.soc_alerting.config.settings import get_settings
+# Import database models and settings from shared modules
+from shared.models.db_models import Base
+from shared.config.settings import get_settings
 
 # this is the Alembic Config object
 config = context.config
