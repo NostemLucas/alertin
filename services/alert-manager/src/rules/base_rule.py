@@ -4,6 +4,7 @@ Base alert rule definition.
 from enum import Enum
 from typing import Dict, Any
 from abc import ABC, abstractmethod
+from models.alerts import AlertMessage
 
 
 class AlertPriority(str, Enum):
@@ -42,19 +43,19 @@ class AlertRule(ABC):
         """
         pass
 
-    def create_alert(self, cve_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_alert(self, cve_data: Dict[str, Any]) -> AlertMessage:
         """Create alert message.
 
         Args:
             cve_data: CVE data
 
         Returns:
-            Alert message
+            AlertMessage dataclass
         """
-        return {
-            "rule_name": self.name,
-            "priority": self.priority.value,
-            "cve_id": cve_data.get("cve_id"),
-            "description": self.description,
-            "cve_data": cve_data,
-        }
+        return AlertMessage(
+            rule_name=self.name,
+            priority=self.priority.value,
+            cve_id=cve_data.get("cve_id", "UNKNOWN"),
+            description=self.description,
+            cve_data=cve_data,
+        )

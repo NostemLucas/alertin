@@ -13,6 +13,7 @@ from sqlalchemy import select, desc, func, and_, or_
 
 from ...models.database_minimal import CVERecord, CVEUpdateHistory, ProcessingLog
 from ...models.domain_minimal import CVEMinimal, SeverityLevel
+from ...models.statistics import CVEStatistics
 
 logger = logging.getLogger(__name__)
 
@@ -314,12 +315,12 @@ class CVERepositoryMinimal:
         result = await self.session.execute(query)
         return list(result.scalars().all())
 
-    async def get_statistics(self) -> Dict[str, Any]:
+    async def get_statistics(self) -> CVEStatistics:
         """
         Get database statistics.
 
         Returns:
-            Dict with counts by severity, KEV status, etc.
+            CVEStatistics dataclass with counts by severity, KEV status, etc.
         """
         # Total count
         total_result = await self.session.execute(
@@ -357,13 +358,13 @@ class CVERepositoryMinimal:
         )
         recent_count = recent_result.scalar()
 
-        return {
-            "total_cves": total,
-            "by_severity": by_severity,
-            "in_cisa_kev": kev_count,
-            "by_attack_vector": by_attack_vector,
-            "recent_7_days": recent_count,
-        }
+        return CVEStatistics(
+            total_cves=total,
+            by_severity=by_severity,
+            in_cisa_kev=kev_count,
+            by_attack_vector=by_attack_vector,
+            recent_7_days=recent_count,
+        )
 
     async def search_by_product(
         self,

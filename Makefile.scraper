@@ -1,0 +1,97 @@
+# ============================================================================
+# SOC Alerting - CVE Scraper Makefile
+# ============================================================================
+# Comandos útiles para gestionar el scraper en Docker
+
+.PHONY: help setup up down logs restart seed check clean
+
+# Default
+help:
+	@echo "SOC Alerting - CVE Scraper Commands"
+	@echo "===================================="
+	@echo ""
+	@echo "Setup:"
+	@echo "  make setup      - Configurar entorno (copiar .env)"
+	@echo "  make check      - Verificar configuración"
+	@echo ""
+	@echo "Docker:"
+	@echo "  make up         - Levantar servicios"
+	@echo "  make down       - Detener servicios"
+	@echo "  make restart    - Reiniciar servicios"
+	@echo "  make logs       - Ver logs del scraper"
+	@echo "  make ps         - Ver estado de servicios"
+	@echo ""
+	@echo "Database:"
+	@echo "  make seed       - Poblar base de datos con datos de prueba"
+	@echo "  make psql       - Conectar a PostgreSQL"
+	@echo ""
+	@echo "Maintenance:"
+	@echo "  make clean      - Limpiar y eliminar volúmenes"
+	@echo "  make rebuild    - Reconstruir imágenes"
+	@echo ""
+
+# Setup
+setup:
+	@echo "Configurando entorno..."
+	@if [ ! -f .env ]; then \
+		cp .env.scraper .env; \
+		echo "✓ Archivo .env creado"; \
+		echo "⚠ Edita .env y configura NIST_API_KEY"; \
+	else \
+		echo "✓ Archivo .env ya existe"; \
+	fi
+
+# Check configuration
+check:
+	@bash scripts/check_setup.sh
+
+# Docker commands
+up:
+	docker-compose -f docker-compose.scraper.yml up -d
+	@echo "✓ Servicios iniciados"
+	@echo "  Kafka UI: http://localhost:8080"
+	@echo "  Ver logs: make logs"
+
+down:
+	docker-compose -f docker-compose.scraper.yml down
+	@echo "✓ Servicios detenidos"
+
+restart:
+	docker-compose -f docker-compose.scraper.yml restart cve-scraper
+	@echo "✓ Scraper reiniciado"
+
+logs:
+	docker-compose -f docker-compose.scraper.yml logs -f cve-scraper
+
+ps:
+	docker-compose -f docker-compose.scraper.yml ps
+
+# Database
+seed:
+	@echo "Instalando dependencias..."
+	@cd scripts && pip install -q -r requirements.txt
+	@echo "Ejecutando seed..."
+	@python scripts/seed_database.py
+
+psql:
+	docker exec -it soc-postgres psql -U soc_user -d soc_alerting
+
+# Maintenance
+clean:
+	@echo "⚠️  Esto eliminará TODOS los datos de la base de datos"
+	@read -p "¿Estás seguro? [y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		docker-compose -f docker-compose.scraper.yml down -v; \
+		echo "✓ Limpieza completada"; \
+	else \
+		echo "Cancelado"; \
+	fi
+
+rebuild:
+	docker-compose -f docker-compose.scraper.yml build --no-cache cve-scraper
+	@echo "✓ Imagen reconstruida"
+
+# Run scraper once (manual execution)
+scrape-once:
+	docker-compose -f docker-compose.scraper.yml run --rm cve-scraper python scraper.py --hours-back 24

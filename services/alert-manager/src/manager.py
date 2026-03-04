@@ -11,6 +11,7 @@ sys.path.insert(0, "/app/shared")
 
 from shared.kafka import KafkaConsumerClient, KafkaProducerClient, KafkaTopics
 from rules import get_default_rules, AlertRule
+from models.alerts import AlertMessage
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +34,14 @@ class AlertManager:
         self.alert_count = 0
         logger.info(f"Alert Manager initialized with {len(self.rules)} rules")
 
-    def evaluate_cve(self, cve_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def evaluate_cve(self, cve_data: Dict[str, Any]) -> List[AlertMessage]:
         """Evaluate CVE against all rules.
 
         Args:
             cve_data: Enriched CVE data
 
         Returns:
-            List of alerts generated
+            List of AlertMessage dataclasses generated
         """
         alerts = []
 
@@ -48,7 +49,6 @@ class AlertManager:
             try:
                 if rule.matches(cve_data):
                     alert = rule.create_alert(cve_data)
-                    alert["generated_at"] = datetime.now(timezone.utc).isoformat()
                     alerts.append(alert)
                     logger.info(
                         f"Rule '{rule.name}' matched for {cve_data.get('cve_id')} "
@@ -83,16 +83,13 @@ class AlertManager:
             for alert in alerts:
                 success = self.kafka_producer.send_message(
                     topic=KafkaTopics.CVE_ALERTS,
-                    message=alert,
+                    message=alert.to_dict(),
                     key=cve_id,
                 )
 
                 if success:
                     self.alert_count += 1
-                    logger.info(
-                        f"Alert sent: {cve_id} - {alert['rule_name']} "
-                        f"(priority: {alert['priority']})"
-                    )
+                    logger.info(f"Alert sent: {alert}")
                 else:
                     logger.warning(f"Failed to send alert for {cve_id}")
 

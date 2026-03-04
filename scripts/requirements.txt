@@ -1,0 +1,14 @@
+# ============================================================================
+# Requirements for local Python scripts (seed, migrations, etc.)
+# ============================================================================
+
+# Database
+asyncpg==0.29.0
+sqlalchemy[asyncio]==2.0.23
+psycopg2-binary==2.9.9
+
+# Data validation
+pydantic==2.5.0
+
+# Utilities
+python-dotenv==1.0.0

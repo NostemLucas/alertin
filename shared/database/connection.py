@@ -13,14 +13,48 @@ from sqlalchemy import event, text, exc as sa_exc
 from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional, Dict, Any
+from dataclasses import dataclass, field
 import logging
 import asyncio
 from datetime import datetime
 
 from ..config.settings import get_settings
 from ..models.database import Base
+from ..models.statistics import PoolStatistics
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PoolMetrics:
+    """
+    Connection pool metrics.
+
+    Replaces dictionary-based stats to avoid string-based key access
+    and provide type safety.
+    """
+    total_checkouts: int = 0
+    total_checkins: int = 0
+    current_checked_out: int = 0
+    last_error: str | None = None
+    last_error_time: datetime | None = None
+
+
+@dataclass
+class HealthCheckResult:
+    """
+    Health check result with type safety.
+
+    Replaces dictionary-based result to avoid string-based key access
+    and provide type safety.
+    """
+    healthy: bool = False
+    latency_ms: float | None = None
+    error: str | None = None
+    error_type: str | None = None
+    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    pool_stats: Dict[str, Any] | None = None
+    database_url: str | None = None
 
 
 class DatabaseConnection:
@@ -53,14 +87,8 @@ class DatabaseConnection:
         else:
             self.database_url = raw_url
 
-        # Connection pool metrics
-        self._pool_stats: Dict[str, Any] = {
-            "total_checkouts": 0,
-            "total_checkins": 0,
-            "current_checked_out": 0,
-            "last_error": None,
-            "last_error_time": None,
-        }
+        # Connection pool metrics (type-safe dataclass)
+        self._pool_stats = PoolMetrics()
 
         # Create async engine with advanced pooling
         self.engine = create_async_engine(
@@ -108,16 +136,16 @@ class DatabaseConnection:
         @event.listens_for(self.engine.sync_engine.pool, "checkout")
         def on_checkout(dbapi_conn, connection_record, connection_proxy):  # noqa: ARG001
             """Called when a connection is retrieved from the pool."""
-            self._pool_stats["total_checkouts"] += 1
-            self._pool_stats["current_checked_out"] += 1
-            logger.debug(f"Connection checked out (total: {self._pool_stats['current_checked_out']})")
+            self._pool_stats.total_checkouts += 1
+            self._pool_stats.current_checked_out += 1
+            logger.debug(f"Connection checked out (total: {self._pool_stats.current_checked_out})")
 
         @event.listens_for(self.engine.sync_engine.pool, "checkin")
         def on_checkin(dbapi_conn, connection_record):  # noqa: ARG001
             """Called when a connection is returned to the pool."""
-            self._pool_stats["total_checkins"] += 1
-            self._pool_stats["current_checked_out"] -= 1
-            logger.debug(f"Connection checked in (total: {self._pool_stats['current_checked_out']})")
+            self._pool_stats.total_checkins += 1
+            self._pool_stats.current_checked_out -= 1
+            logger.debug(f"Connection checked in (total: {self._pool_stats.current_checked_out})")
 
     def _get_safe_url(self) -> str:
         """Get database URL with password masked."""
@@ -130,21 +158,25 @@ class DatabaseConnection:
                 return f"{user_pass[0]}:****@{parts[1]}"
         return url
 
-    def get_pool_stats(self) -> Dict[str, Any]:
+    def get_pool_stats(self) -> PoolStatistics:
         """
         Get connection pool statistics.
 
         Returns:
-            Dictionary with pool metrics
+            PoolStatistics dataclass with pool metrics
         """
         pool = self.engine.sync_engine.pool
-        return {
-            **self._pool_stats,
-            "pool_size": pool.size(),
-            "checked_out_connections": pool.checkedout(),
-            "overflow_connections": pool.overflow(),
-            "queue_size": pool.size() - pool.checkedout(),
-        }
+        return PoolStatistics(
+            total_checkouts=self._pool_stats.total_checkouts,
+            total_checkins=self._pool_stats.total_checkins,
+            current_checked_out=self._pool_stats.current_checked_out,
+            last_error=self._pool_stats.last_error,
+            last_error_time=self._pool_stats.last_error_time.isoformat() if self._pool_stats.last_error_time else None,
+            pool_size=pool.size(),
+            checked_out_connections=pool.checkedout(),
+            overflow_connections=pool.overflow(),
+            queue_size=pool.size() - pool.checkedout(),
+        )
 
 
     # ============================================================================
@@ -179,8 +211,8 @@ class DatabaseConnection:
                 await session.commit()
         except sa_exc.OperationalError as e:
             await session.rollback()
-            self._pool_stats["last_error"] = str(e)
-            self._pool_stats["last_error_time"] = datetime.utcnow()
+            self._pool_stats.last_error = str(e)
+            self._pool_stats.last_error_time = datetime.utcnow()
             logger.error(f"Database operational error: {e}", exc_info=True)
             raise
         except sa_exc.IntegrityError as e:
@@ -193,8 +225,8 @@ class DatabaseConnection:
             raise
         except Exception as e:
             await session.rollback()
-            self._pool_stats["last_error"] = str(e)
-            self._pool_stats["last_error_time"] = datetime.utcnow()
+            self._pool_stats.last_error = str(e)
+            self._pool_stats.last_error_time = datetime.utcnow()
             logger.error(f"Unexpected session error: {e}", exc_info=True)
             raise
         finally:
@@ -273,7 +305,7 @@ class DatabaseConnection:
         await self.engine.dispose()
         logger.info("Database connections closed")
 
-    async def health_check(self, detailed: bool = False) -> Dict[str, Any]:
+    async def health_check(self, detailed: bool = False) -> HealthCheckResult:
         """
         Check database connectivity with optional detailed metrics.
 
@@ -281,22 +313,10 @@ class DatabaseConnection:
             detailed: Include detailed pool statistics
 
         Returns:
-            Dictionary with health check results
-
-        Example:
-            {
-                "healthy": True,
-                "latency_ms": 15.3,
-                "pool_stats": {...}  # if detailed=True
-            }
+            HealthCheckResult dataclass with health check results
         """
         start_time = datetime.utcnow()
-        result = {
-            "healthy": False,
-            "latency_ms": None,
-            "error": None,
-            "timestamp": start_time.isoformat(),
-        }
+        result = HealthCheckResult(timestamp=start_time.isoformat())
 
         try:
             async with self.get_session() as session:
@@ -306,19 +326,20 @@ class DatabaseConnection:
             end_time = datetime.utcnow()
             latency = (end_time - start_time).total_seconds() * 1000
 
-            result["healthy"] = True
-            result["latency_ms"] = round(latency, 2)
+            result.healthy = True
+            result.latency_ms = round(latency, 2)
 
             if detailed:
-                result["pool_stats"] = self.get_pool_stats()
-                result["database_url"] = self._get_safe_url()
+                pool_stats = self.get_pool_stats()
+                result.pool_stats = pool_stats.to_dict()
+                result.database_url = self._get_safe_url()
 
-            logger.debug(f"Health check passed (latency: {result['latency_ms']}ms)")
+            logger.debug(f"Health check passed (latency: {result.latency_ms}ms)")
             return result
 
         except Exception as e:
-            result["error"] = str(e)
-            result["error_type"] = type(e).__name__
+            result.error = str(e)
+            result.error_type = type(e).__name__
             logger.error(f"Health check failed: {e}")
             return result
 
