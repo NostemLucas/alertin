@@ -1,97 +1,265 @@
 # ============================================================================
 # SOC Alerting - CVE Scraper Makefile
 # ============================================================================
-# Comandos útiles para gestionar el scraper en Docker
+# Comandos útiles para gestionar el scraper y base de datos
 
-.PHONY: help setup up down logs restart seed check clean
+.PHONY: help setup up down logs restart seed check clean rebuild test db-migrate db-status shell-scraper shell-db
 
-# Default
+# Colores para output
+GREEN=\033[0;32m
+YELLOW=\033[1;33m
+RED=\033[0;31m
+NC=\033[0m # No Color
+
+# ============================================================================
+# HELP
+# ============================================================================
 help:
-	@echo "SOC Alerting - CVE Scraper Commands"
-	@echo "===================================="
 	@echo ""
-	@echo "Setup:"
-	@echo "  make setup      - Configurar entorno (copiar .env)"
-	@echo "  make check      - Verificar configuración"
+	@echo "$(GREEN)SOC Alerting - CVE Scraper Commands$(NC)"
+	@echo "=========================================="
 	@echo ""
-	@echo "Docker:"
-	@echo "  make up         - Levantar servicios"
-	@echo "  make down       - Detener servicios"
-	@echo "  make restart    - Reiniciar servicios"
-	@echo "  make logs       - Ver logs del scraper"
-	@echo "  make ps         - Ver estado de servicios"
+	@echo "$(YELLOW)📦 Setup & Configuration:$(NC)"
+	@echo "  make setup          - Configurar entorno (.env)"
+	@echo "  make check          - Verificar configuración"
+	@echo "  make deps           - Instalar dependencias Python locales"
 	@echo ""
-	@echo "Database:"
-	@echo "  make seed       - Poblar base de datos con datos de prueba"
-	@echo "  make psql       - Conectar a PostgreSQL"
+	@echo "$(YELLOW)🐳 Docker Services:$(NC)"
+	@echo "  make up             - Levantar todos los servicios"
+	@echo "  make down           - Detener todos los servicios"
+	@echo "  make restart        - Reiniciar scraper"
+	@echo "  make restart-all    - Reiniciar todos los servicios"
+	@echo "  make ps             - Ver estado de servicios"
+	@echo "  make logs           - Ver logs del scraper (live)"
+	@echo "  make logs-all       - Ver logs de todos los servicios"
 	@echo ""
-	@echo "Maintenance:"
-	@echo "  make clean      - Limpiar y eliminar volúmenes"
-	@echo "  make rebuild    - Reconstruir imágenes"
+	@echo "$(YELLOW)💾 Database:$(NC)"
+	@echo "  make db-up          - Solo levantar PostgreSQL"
+	@echo "  make db-down        - Solo detener PostgreSQL"
+	@echo "  make db-migrate     - Aplicar migraciones Alembic"
+	@echo "  make db-status      - Ver estado de migraciones"
+	@echo "  make db-seed        - Poblar BD con datos de prueba"
+	@echo "  make db-reset       - Resetear BD (drop + seed)"
+	@echo "  make db-shell       - Conectar a PostgreSQL (psql)"
+	@echo "  make db-backup      - Crear backup de BD"
+	@echo ""
+	@echo "$(YELLOW)🔍 Scraper Operations:$(NC)"
+	@echo "  make scrape         - Ejecutar scraper manualmente (1 vez)"
+	@echo "  make scrape-recent  - Scraper últimas 24h"
+	@echo "  make scrape-week    - Scraper última semana"
+	@echo "  make shell-scraper  - Abrir shell en contenedor scraper"
+	@echo ""
+	@echo "$(YELLOW)🧪 Testing & Debugging:$(NC)"
+	@echo "  make test           - Ejecutar tests"
+	@echo "  make lint           - Verificar código (pylint/flake8)"
+	@echo "  make format         - Formatear código (black)"
+	@echo ""
+	@echo "$(YELLOW)🧹 Maintenance:$(NC)"
+	@echo "  make clean          - Limpiar y eliminar volúmenes"
+	@echo "  make clean-cache    - Limpiar archivos .pyc y __pycache__"
+	@echo "  make rebuild        - Reconstruir imagen del scraper"
+	@echo "  make rebuild-all    - Reconstruir todas las imágenes"
 	@echo ""
 
-# Setup
+# ============================================================================
+# SETUP & CONFIGURATION
+# ============================================================================
 setup:
-	@echo "Configurando entorno..."
+	@echo "$(GREEN)📦 Configurando entorno...$(NC)"
 	@if [ ! -f .env ]; then \
 		cp .env.scraper .env; \
-		echo "✓ Archivo .env creado"; \
-		echo "⚠ Edita .env y configura NIST_API_KEY"; \
+		echo "$(GREEN)✓$(NC) Archivo .env creado"; \
+		echo "$(YELLOW)⚠$(NC)  Edita .env y configura NIST_API_KEY"; \
+		echo "$(YELLOW)⚠$(NC)  Get key: https://nvd.nist.gov/developers/request-an-api-key"; \
 	else \
-		echo "✓ Archivo .env ya existe"; \
+		echo "$(GREEN)✓$(NC) Archivo .env ya existe"; \
 	fi
 
-# Check configuration
 check:
+	@echo "$(GREEN)🔍 Verificando configuración...$(NC)"
 	@bash scripts/check_setup.sh
 
-# Docker commands
+deps:
+	@echo "$(GREEN)📦 Instalando dependencias locales...$(NC)"
+	@pip install -q -r scripts/requirements.txt
+	@echo "$(GREEN)✓$(NC) Dependencias instaladas"
+
+# ============================================================================
+# DOCKER SERVICES
+# ============================================================================
 up:
+	@echo "$(GREEN)🐳 Levantando servicios...$(NC)"
 	docker-compose -f docker-compose.scraper.yml up -d
-	@echo "✓ Servicios iniciados"
-	@echo "  Kafka UI: http://localhost:8080"
-	@echo "  Ver logs: make logs"
+	@echo ""
+	@echo "$(GREEN)✓ Servicios iniciados$(NC)"
+	@echo ""
+	@echo "  📊 Kafka UI:      http://localhost:8080"
+	@echo "  🗄️  PostgreSQL:    localhost:5432"
+	@echo "  📡 Kafka:         localhost:9092"
+	@echo ""
+	@echo "  Ver logs:  $(YELLOW)make logs$(NC)"
+	@echo "  Ver estado: $(YELLOW)make ps$(NC)"
+	@echo ""
 
 down:
+	@echo "$(RED)⬇️  Deteniendo servicios...$(NC)"
 	docker-compose -f docker-compose.scraper.yml down
-	@echo "✓ Servicios detenidos"
+	@echo "$(GREEN)✓$(NC) Servicios detenidos"
 
 restart:
+	@echo "$(YELLOW)🔄 Reiniciando scraper...$(NC)"
 	docker-compose -f docker-compose.scraper.yml restart cve-scraper
-	@echo "✓ Scraper reiniciado"
+	@echo "$(GREEN)✓$(NC) Scraper reiniciado"
 
-logs:
-	docker-compose -f docker-compose.scraper.yml logs -f cve-scraper
+restart-all:
+	@echo "$(YELLOW)🔄 Reiniciando todos los servicios...$(NC)"
+	docker-compose -f docker-compose.scraper.yml restart
+	@echo "$(GREEN)✓$(NC) Servicios reiniciados"
 
 ps:
-	docker-compose -f docker-compose.scraper.yml ps
+	@echo "$(GREEN)📋 Estado de servicios:$(NC)"
+	@docker-compose -f docker-compose.scraper.yml ps
 
-# Database
-seed:
-	@echo "Instalando dependencias..."
-	@cd scripts && pip install -q -r requirements.txt
-	@echo "Ejecutando seed..."
+logs:
+	@echo "$(GREEN)📜 Logs del scraper (Ctrl+C para salir):$(NC)"
+	@docker-compose -f docker-compose.scraper.yml logs -f cve-scraper
+
+logs-all:
+	@echo "$(GREEN)📜 Logs de todos los servicios:$(NC)"
+	@docker-compose -f docker-compose.scraper.yml logs -f
+
+# ============================================================================
+# DATABASE
+# ============================================================================
+db-up:
+	@echo "$(GREEN)🗄️  Levantando PostgreSQL...$(NC)"
+	docker-compose -f docker-compose.scraper.yml up -d postgres
+	@echo "$(GREEN)✓$(NC) PostgreSQL iniciado"
+
+db-down:
+	@echo "$(RED)⬇️  Deteniendo PostgreSQL...$(NC)"
+	docker-compose -f docker-compose.scraper.yml stop postgres
+	@echo "$(GREEN)✓$(NC) PostgreSQL detenido"
+
+db-migrate:
+	@echo "$(GREEN)🔄 Aplicando migraciones...$(NC)"
+	@cd shared/database/migrations && alembic upgrade head
+	@echo "$(GREEN)✓$(NC) Migraciones aplicadas"
+
+db-status:
+	@echo "$(GREEN)📊 Estado de migraciones:$(NC)"
+	@cd shared/database/migrations && alembic current && alembic history
+
+db-seed:
+	@echo "$(GREEN)🌱 Poblando base de datos...$(NC)"
+	@pip install -q -r scripts/requirements.txt
 	@python scripts/seed_database.py
+	@echo "$(GREEN)✓$(NC) Base de datos poblada"
 
-psql:
-	docker exec -it soc-postgres psql -U soc_user -d soc_alerting
+db-reset:
+	@echo "$(RED)⚠️  Esto ELIMINARÁ todos los datos de la BD$(NC)"
+	@read -p "¿Continuar? [y/N] " -n 1 -r; \
+	echo; \
+	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
+		echo "$(YELLOW)Eliminando tablas...$(NC)"; \
+		docker exec -it postgres psql -U soc_user -d soc_alerting -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"; \
+		echo "$(YELLOW)Creando tablas...$(NC)"; \
+		python scripts/seed_database.py; \
+		echo "$(GREEN)✓$(NC) Base de datos reseteada"; \
+	else \
+		echo "$(RED)Cancelado$(NC)"; \
+	fi
 
-# Maintenance
+db-shell:
+	@echo "$(GREEN)🐚 Conectando a PostgreSQL...$(NC)"
+	docker exec -it postgres psql -U soc_user -d soc_alerting
+
+db-backup:
+	@echo "$(GREEN)💾 Creando backup...$(NC)"
+	@mkdir -p backups
+	@docker exec -t postgres pg_dump -U soc_user soc_alerting > backups/backup_$(shell date +%Y%m%d_%H%M%S).sql
+	@echo "$(GREEN)✓$(NC) Backup creado en backups/"
+
+# ============================================================================
+# SCRAPER OPERATIONS
+# ============================================================================
+scrape:
+	@echo "$(GREEN)🔍 Ejecutando scraper (24h hacia atrás)...$(NC)"
+	docker-compose -f docker-compose.scraper.yml run --rm cve-scraper python scraper.py --hours-back 24
+
+scrape-recent:
+	@echo "$(GREEN)🔍 Scraping CVEs recientes (últimas 24h)...$(NC)"
+	docker-compose -f docker-compose.scraper.yml run --rm cve-scraper python scraper.py --hours-back 24
+
+scrape-week:
+	@echo "$(GREEN)🔍 Scraping CVEs de la última semana...$(NC)"
+	docker-compose -f docker-compose.scraper.yml run --rm cve-scraper python scraper.py --hours-back 168
+
+shell-scraper:
+	@echo "$(GREEN)🐚 Abriendo shell en contenedor scraper...$(NC)"
+	docker-compose -f docker-compose.scraper.yml exec cve-scraper /bin/bash
+
+# ============================================================================
+# TESTING & DEBUGGING
+# ============================================================================
+test:
+	@echo "$(GREEN)🧪 Ejecutando tests...$(NC)"
+	@pytest tests/ -v
+
+lint:
+	@echo "$(GREEN)🔍 Verificando código...$(NC)"
+	@pylint services/cve-scraper/src/ shared/ || true
+
+format:
+	@echo "$(GREEN)✨ Formateando código...$(NC)"
+	@black services/cve-scraper/src/ shared/ scripts/
+
+# ============================================================================
+# MAINTENANCE
+# ============================================================================
 clean:
-	@echo "⚠️  Esto eliminará TODOS los datos de la base de datos"
+	@echo "$(RED)⚠️  Esto eliminará TODOS los datos (volúmenes de Docker)$(NC)"
 	@read -p "¿Estás seguro? [y/N] " -n 1 -r; \
 	echo; \
 	if [[ $$REPLY =~ ^[Yy]$$ ]]; then \
 		docker-compose -f docker-compose.scraper.yml down -v; \
-		echo "✓ Limpieza completada"; \
+		echo "$(GREEN)✓$(NC) Limpieza completada"; \
 	else \
-		echo "Cancelado"; \
+		echo "$(RED)Cancelado$(NC)"; \
 	fi
 
-rebuild:
-	docker-compose -f docker-compose.scraper.yml build --no-cache cve-scraper
-	@echo "✓ Imagen reconstruida"
+clean-cache:
+	@echo "$(GREEN)🧹 Limpiando archivos Python cache...$(NC)"
+	@find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	@find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	@find . -type f -name "*.pyo" -delete 2>/dev/null || true
+	@echo "$(GREEN)✓$(NC) Cache limpiado"
 
-# Run scraper once (manual execution)
-scrape-once:
-	docker-compose -f docker-compose.scraper.yml run --rm cve-scraper python scraper.py --hours-back 24
+rebuild:
+	@echo "$(YELLOW)🔨 Reconstruyendo imagen del scraper...$(NC)"
+	docker-compose -f docker-compose.scraper.yml build --no-cache cve-scraper
+	@echo "$(GREEN)✓$(NC) Imagen reconstruida"
+
+rebuild-all:
+	@echo "$(YELLOW)🔨 Reconstruyendo todas las imágenes...$(NC)"
+	docker-compose -f docker-compose.scraper.yml build --no-cache
+	@echo "$(GREEN)✓$(NC) Todas las imágenes reconstruidas"
+
+# ============================================================================
+# QUICK WORKFLOWS
+# ============================================================================
+# Setup completo inicial
+init: setup deps db-up
+	@echo ""
+	@echo "$(GREEN)✓ Setup inicial completado$(NC)"
+	@echo ""
+	@echo "Siguiente paso: $(YELLOW)make db-seed$(NC) para poblar la BD"
+	@echo "Luego: $(YELLOW)make up$(NC) para levantar todos los servicios"
+	@echo ""
+
+# Dev workflow: levantar todo + logs
+dev: up logs
+
+# Refresh: rebuild + restart
+refresh: rebuild restart
+	@echo "$(GREEN)✓ Scraper actualizado$(NC)"

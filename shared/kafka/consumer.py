@@ -3,11 +3,12 @@ Kafka consumer client for SOC Alerting System.
 """
 import json
 import logging
+import time
 from typing import Dict, Any, Callable, List, Optional
-from kafka import KafkaConsumer
+from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
 
-from .config import KafkaConfig
+from .config import KafkaConfig, KafkaTopics
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class KafkaConsumerClient:
         topics: List[str],
         group_id: str,
         config: Optional[KafkaConfig] = None,
+        enable_dlq: bool = True,
     ):
         """Initialize Kafka consumer.
 
@@ -27,11 +29,16 @@ class KafkaConsumerClient:
             topics: List of topics to subscribe to
             group_id: Consumer group ID
             config: Kafka configuration. If None, uses default.
+            enable_dlq: Enable Dead Letter Queue for failed messages
         """
         self.topics = topics
         self.group_id = group_id
         self.config = config or KafkaConfig()
+        self.enable_dlq = enable_dlq
         self.consumer = self._create_consumer()
+
+        # Initialize DLQ producer if enabled
+        self.dlq_producer = self._create_dlq_producer() if enable_dlq else None
 
     def _create_consumer(self) -> KafkaConsumer:
         """Create Kafka consumer instance."""
@@ -47,44 +54,145 @@ class KafkaConsumerClient:
             key_deserializer=lambda k: k.decode("utf-8") if k else None,
         )
 
+    def _create_dlq_producer(self) -> KafkaProducer:
+        """Create Kafka producer for Dead Letter Queue."""
+        return KafkaProducer(
+            bootstrap_servers=self.config.bootstrap_servers.split(","),
+            client_id=f"{self.config.client_id}-dlq-producer",
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+            key_serializer=lambda k: k.encode("utf-8") if k else None,
+        )
+
+    def _send_to_dlq(
+        self,
+        message_key: Optional[str],
+        message_value: Dict[str, Any],
+        error: Exception,
+        retry_count: int
+    ):
+        """Send failed message to Dead Letter Queue.
+
+        Args:
+            message_key: Original message key
+            message_value: Original message value
+            error: Exception that caused the failure
+            retry_count: Number of retries attempted
+        """
+        if not self.dlq_producer:
+            logger.warning("DLQ not enabled, cannot send failed message")
+            return
+
+        dlq_message = {
+            "original_message": message_value,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            "retry_count": retry_count,
+            "timestamp": time.time(),
+        }
+
+        try:
+            self.dlq_producer.send(
+                KafkaTopics.CVE_DLQ,
+                value=dlq_message,
+                key=message_key
+            )
+            self.dlq_producer.flush()
+            logger.info(f"Sent message {message_key} to DLQ after {retry_count} retries")
+        except Exception as dlq_error:
+            logger.error(f"Failed to send message to DLQ: {dlq_error}")
+
     def consume(
         self,
         handler: Callable[[Dict[str, Any]], bool],
         error_handler: Optional[Callable[[Exception, Dict[str, Any]], None]] = None,
     ):
-        """Consume messages from subscribed topics.
+        """Consume messages from subscribed topics with manual commit.
+
+        Features:
+        - Manual commit only on successful processing
+        - Retry logic with exponential backoff
+        - Dead Letter Queue for permanently failed messages
+        - At-least-once delivery guarantee
 
         Args:
             handler: Function to process each message. Should return True on success.
             error_handler: Optional function to handle processing errors.
         """
-        logger.info(f"Starting consumer for topics: {self.topics}")
+        logger.info(
+            f"Starting consumer for topics: {self.topics} "
+            f"(manual_commit={not self.config.consumer_enable_auto_commit}, "
+            f"max_retries={self.config.consumer_max_retries})"
+        )
 
         try:
             for message in self.consumer:
-                try:
-                    logger.debug(
-                        f"Received message from {message.topic} "
-                        f"[partition={message.partition}, offset={message.offset}]"
+                retry_count = 0
+                success = False
+
+                logger.debug(
+                    f"Received message from {message.topic} "
+                    f"[partition={message.partition}, offset={message.offset}, key={message.key}]"
+                )
+
+                # Retry loop con exponential backoff
+                while retry_count <= self.config.consumer_max_retries and not success:
+                    try:
+                        # Process message
+                        success = handler(message.value)
+
+                        if success:
+                            # ✅ SUCCESS: Commit offset manualmente
+                            if not self.config.consumer_enable_auto_commit:
+                                self.consumer.commit()
+                                logger.debug(f"✅ Committed offset {message.offset} for {message.key}")
+                        else:
+                            logger.warning(
+                                f"Handler returned False for {message.key} "
+                                f"(retry {retry_count + 1}/{self.config.consumer_max_retries + 1})"
+                            )
+                            retry_count += 1
+
+                            if retry_count <= self.config.consumer_max_retries:
+                                # Exponential backoff: 1s, 2s, 4s...
+                                backoff = 2 ** (retry_count - 1)
+                                logger.info(f"Retrying in {backoff}s...")
+                                time.sleep(backoff)
+
+                    except Exception as e:
+                        logger.error(
+                            f"Error processing message {message.key}: {e} "
+                            f"(retry {retry_count + 1}/{self.config.consumer_max_retries + 1})"
+                        )
+
+                        retry_count += 1
+
+                        if error_handler:
+                            error_handler(e, message.value)
+
+                        if retry_count <= self.config.consumer_max_retries:
+                            # Exponential backoff
+                            backoff = 2 ** (retry_count - 1)
+                            logger.info(f"Retrying in {backoff}s...")
+                            time.sleep(backoff)
+
+                # Si agotamos todos los reintentos, enviar a DLQ
+                if not success:
+                    logger.error(
+                        f"❌ Message {message.key} failed after {retry_count} retries, "
+                        f"sending to DLQ"
+                    )
+                    self._send_to_dlq(
+                        message.key,
+                        message.value,
+                        Exception("Max retries exceeded"),
+                        retry_count
                     )
 
-                    # Process message
-                    success = handler(message.value)
-
-                    if not success:
-                        logger.warning(
-                            f"Handler returned False for message: {message.key}"
-                        )
-                        if error_handler:
-                            error_handler(
-                                Exception("Handler returned False"),
-                                message.value
-                            )
-
-                except Exception as e:
-                    logger.error(f"Error processing message: {e}")
-                    if error_handler:
-                        error_handler(e, message.value)
+                    # ⚠️ IMPORTANTE: Commit el offset incluso si falla
+                    # Para no procesar el mismo mensaje indefinidamente
+                    if not self.config.consumer_enable_auto_commit:
+                        self.consumer.commit()
+                        logger.debug(f"Committed offset {message.offset} (failed message)")
 
         except KeyboardInterrupt:
             logger.info("Consumer interrupted by user")
@@ -137,12 +245,16 @@ class KafkaConsumerClient:
             self.close()
 
     def close(self):
-        """Close consumer connection."""
+        """Close consumer and DLQ producer connections."""
         logger.info("Closing Kafka consumer")
         self.consumer.close()
+
+        if self.dlq_producer:
+            logger.info("Closing DLQ producer")
+            self.dlq_producer.close()
 
     def __enter__(self):
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
         self.close()

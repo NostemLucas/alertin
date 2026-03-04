@@ -42,6 +42,7 @@ class KafkaProducerClient:
         topic: str,
         message: Dict[str, Any],
         key: Optional[str] = None,
+        async_send: bool = False,
     ) -> bool:
         """Send a message to Kafka topic.
 
@@ -49,21 +50,34 @@ class KafkaProducerClient:
             topic: Kafka topic name
             message: Message payload (will be JSON serialized)
             key: Optional message key for partitioning
+            async_send: If True, sends without waiting for confirmation (higher throughput)
 
         Returns:
-            True if message sent successfully, False otherwise
+            True if message sent successfully (or queued if async), False otherwise
+
+        Note:
+            - Synchronous (async_send=False): Blocks until Kafka confirms. Slower but safer.
+            - Asynchronous (async_send=True): Fire-and-forget. Faster but may lose messages
+              if producer crashes. Use flush() periodically to ensure delivery.
         """
         try:
             future = self.producer.send(topic, value=message, key=key)
-            # Wait for confirmation (synchronous send)
-            record_metadata = future.get(timeout=10)
 
-            logger.debug(
-                f"Message sent to {topic} "
-                f"[partition={record_metadata.partition}, "
-                f"offset={record_metadata.offset}]"
-            )
-            return True
+            if async_send:
+                # Fire-and-forget: No esperamos confirmación
+                # Mucho más rápido, útil para alto volumen
+                logger.debug(f"Message queued to {topic} (async mode)")
+                return True
+            else:
+                # Synchronous: Wait for confirmation (safer)
+                record_metadata = future.get(timeout=10)
+
+                logger.debug(
+                    f"Message sent to {topic} "
+                    f"[partition={record_metadata.partition}, "
+                    f"offset={record_metadata.offset}]"
+                )
+                return True
 
         except KafkaError as e:
             logger.error(f"Failed to send message to {topic}: {e}")
@@ -123,9 +137,52 @@ class KafkaProducerClient:
             key=cve_id,
         )
 
-    def flush(self):
-        """Flush pending messages."""
-        self.producer.flush()
+    def send_message_with_callback(
+        self,
+        topic: str,
+        message: Dict[str, Any],
+        key: Optional[str] = None,
+        on_success: Optional[callable] = None,
+        on_error: Optional[callable] = None,
+    ):
+        """Send message asynchronously with callbacks.
+
+        Útil para alto volumen con monitoreo de errores.
+
+        Args:
+            topic: Kafka topic name
+            message: Message payload
+            key: Optional message key
+            on_success: Callback on successful send: on_success(metadata)
+            on_error: Callback on error: on_error(exception)
+
+        Example:
+            def on_ok(metadata):
+                logger.info(f"Sent to partition {metadata.partition}")
+
+            def on_fail(ex):
+                logger.error(f"Failed: {ex}")
+
+            producer.send_message_with_callback(
+                "cve.raw", cve_data, key=cve_id,
+                on_success=on_ok, on_error=on_fail
+            )
+        """
+        future = self.producer.send(topic, value=message, key=key)
+
+        # Attach callbacks
+        if on_success:
+            future.add_callback(on_success)
+        if on_error:
+            future.add_errback(on_error)
+
+    def flush(self, timeout: Optional[int] = None):
+        """Flush pending messages.
+
+        Args:
+            timeout: Maximum time to wait in seconds. None = wait indefinitely.
+        """
+        self.producer.flush(timeout=timeout)
 
     def close(self):
         """Close producer connection."""

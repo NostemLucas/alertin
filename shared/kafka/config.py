@@ -3,7 +3,6 @@ Kafka configuration for SOC Alerting System.
 """
 import os
 from dataclasses import dataclass
-from typing import List
 
 
 @dataclass
@@ -22,8 +21,9 @@ class KafkaConfig:
     # Consumer settings
     consumer_group_id: str = os.getenv("KAFKA_CONSUMER_GROUP_ID", "soc-alerting-group")
     consumer_auto_offset_reset: str = "earliest"
-    consumer_enable_auto_commit: bool = True
+    consumer_enable_auto_commit: bool = False  # Manual commit para garantizar procesamiento
     consumer_max_poll_records: int = 100
+    consumer_max_retries: int = 3  # Reintentos antes de enviar a DLQ
 
 
 class KafkaTopics:
