@@ -30,6 +30,7 @@ class KafkaTopics:
     """Kafka topic names."""
 
     CVE_RAW = "cve.raw"                   # CVEs crudos desde NIST/CISA
+    CVE_TRANSLATED = "cve.translated"     # CVEs traducidos, pending approval
     CVE_ENRICHED = "cve.enriched"         # CVEs enriquecidos con NLP
     CVE_ALERTS = "cve.alerts"             # Alertas generadas
     CVE_NOTIFICATIONS = "cve.notifications"  # Notificaciones (email, Slack)
