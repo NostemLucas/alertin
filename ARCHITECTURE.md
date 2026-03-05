@@ -104,7 +104,7 @@ Sistema de alertas de CVEs con arquitectura de microservicios y Kafka.
 ║                    INFRASTRUCTURE                            ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  • Kafka + Zookeeper: Event streaming (5 topics)            ║
-║  • PostgreSQL: CVE storage (17-field minimal schema)        ║
+║  • PostgreSQL: CVE storage (versioned schema: Header+Versions) ║
 ║  • Redis: Cache + Celery backend                            ║
 ║  • Docker Network: Isolated soc-network                     ║
 ╚══════════════════════════════════════════════════════════════╝

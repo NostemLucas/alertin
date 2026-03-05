@@ -422,10 +422,10 @@ make -f Makefile.scraper refresh
 NIST NVD API
     ↓ fetch_cves_by_modified_date(hours=24)
 NISTVulnerability[] (50+ campos)
-    ↓ convert_to_minimal_domain_model()
-CVEMinimal[] (17 campos)
+    ↓ convert_to_domain_model()
+CVE[] (17 campos críticos)
     ↓ enrich with CISA KEV data
-CVEMinimal[] (enriquecido)
+CVE[] (enriquecido con CISA KEV)
     ↓ save() - Repository
 ┌──────────────────────────────┐
 │ PostgreSQL (Versioned)       │

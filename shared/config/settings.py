@@ -22,7 +22,7 @@ class Settings:
         # ===== Database Configuration =====
         self.database_url: str = os.getenv(
             "DATABASE_URL",
-            "postgresql://soc_user:secure_password@localhost:5433/soc_alerting"
+            "postgresql://soc_user:secure_password@localhost:5432/soc_alerting"
         )
         self.database_pool_size: int = int(os.getenv("DATABASE_POOL_SIZE", "5"))
         self.database_max_overflow: int = int(os.getenv("DATABASE_MAX_OVERFLOW", "10"))

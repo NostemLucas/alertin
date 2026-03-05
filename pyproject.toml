@@ -1,0 +1,18 @@
+[project]
+name = "soc-alerting"
+version = "1.0.0"
+description = "SOC Alerting System - Microservices Architecture"
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+members = [
+    "shared",
+    "services/cve-scraper",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "black>=23.7.0",
+    "ruff>=0.1.0",
+]

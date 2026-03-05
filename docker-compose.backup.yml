@@ -117,6 +117,134 @@ services:
   # ==========================================================================
   # SERVICE 1: CVE Scraper (NIST/CISA)
   # ==========================================================================
+  cve-scraper:
+    build:
+      context: .
+      dockerfile: services/cve-scraper/Dockerfile
+    container_name: soc-cve-scraper
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      # NIST API
+      NIST_API_KEY: ${NIST_API_KEY:-}
+      NIST_RATE_LIMIT_DELAY: ${NIST_RATE_LIMIT_DELAY:-6.0}
+
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CLIENT_ID: cve-scraper
+
+      # Scheduler
+      SCRAPER_INTERVAL_MINUTES: ${SCRAPER_INTERVAL_MINUTES:-60}
+      SCRAPER_HOURS_BACK: ${SCRAPER_HOURS_BACK:-24}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # SERVICE 2: CVE Processor (Enrichment/NLP)
+  # ==========================================================================
+  cve-processor:
+    build:
+      context: .
+      dockerfile: services/cve-processor/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: ${PROCESSOR_REPLICAS:-3}
+    environment:
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CLIENT_ID: cve-processor
+      KAFKA_CONSUMER_GROUP_ID: cve-processor-group
+
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-soc_user}:${POSTGRES_PASSWORD:-CHANGE_ME}@postgres:5432/${POSTGRES_DB:-soc_alerting}
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+
+      # NLP
+      ENABLE_ENRICHMENT: ${ENABLE_ENRICHMENT:-true}
+      ENRICH_SEVERITY_THRESHOLD: ${ENRICH_SEVERITY_THRESHOLD:-HIGH}
+      HF_MODEL_NAME: ${HF_MODEL_NAME:-distilbert-base-uncased}
+      HF_DEVICE: ${HF_DEVICE:--1}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # SERVICE 3: Alert Manager (Rules/Filters)
+  # ==========================================================================
+  alert-manager:
+    build:
+      context: .
+      dockerfile: services/alert-manager/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      replicas: ${ALERT_MANAGER_REPLICAS:-2}
+    environment:
+      # Kafka
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_CLIENT_ID: alert-manager
+      KAFKA_CONSUMER_GROUP_ID: alert-manager-group
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+
+  # ==========================================================================
+  # SERVICE 4: API Gateway (FastAPI)
+  # ==========================================================================
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: soc-api-gateway
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql://${POSTGRES_USER:-soc_user}:${POSTGRES_PASSWORD:-CHANGE_ME}@postgres:5432/${POSTGRES_DB:-soc_alerting}
+
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+
+      # API
+      API_WORKERS: ${API_WORKERS:-4}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    networks:
+      - soc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 # ============================================================================
 # VOLUMES

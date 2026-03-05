@@ -113,7 +113,7 @@ services:
   cve-scraper:
     build:
       context: .
-      dockerfile: services/cve-scraper/Dockerfile
+      dockerfile: ./services/cve-scraper/Dockerfile
     container_name: soc-cve-scraper
     restart: unless-stopped
     depends_on:
@@ -123,11 +123,12 @@ services:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
-    volumes:
-      # Mapea tu código fuente local a la carpeta /app del contenedor
-      - ./services/cve-scraper/src:/app
-      # Mapea la carpeta compartida para que el scraper pueda usarla
-      - ./shared:/app/shared
+    # volumes:
+      # NOTA: Los volúmenes están comentados porque sobrescriben las dependencias
+      # instaladas por Poetry durante el build. Si necesitas desarrollo en vivo,
+      # usa la Opción 2 (ver README)
+      # - ./services/cve-scraper/src:/app
+      # - ./shared:/app/shared
     environment:
       # NIST API
       NIST_API_KEY: ${NIST_API_KEY:-}
